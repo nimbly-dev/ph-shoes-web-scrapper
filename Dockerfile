@@ -21,12 +21,18 @@ RUN apt-get update && apt-get install -y \
     libxcomposite1 \
     libxdamage1 \
     libxrandr2 \
+    ca-certificates \
     && rm -rf /var/lib/apt/lists/*
 
 # Copy requirements and install Python packages
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
+# Install Playwright browsers
+RUN playwright install
+
+# Set the environment variable to persist browser installation
+ENV PLAYWRIGHT_BROWSERS_PATH=/app/browsers
 # Install Playwright browsers
 RUN playwright install
 
