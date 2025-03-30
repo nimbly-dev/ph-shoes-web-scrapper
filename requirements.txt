@@ -1,6 +1,4 @@
 fastapi
 uvicorn
 beautifulsoup4
-playwright
-playwright-stealth
 requests
