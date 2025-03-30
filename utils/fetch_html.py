@@ -26,7 +26,7 @@ def fetch_html(url: str, retries: int = 3, timeout: int = 30)-> str:
     scraper_api_key = os.getenv("SCRAPER_API_KEY")
 
     if use_proxy and scraper_api_key:
-        target_url = f"https://api.scraperapi.com?api_key={scraper_api_key}&url={url}&render={'true'}"
+        target_url = f"https://api.scraperapi.com?api_key={scraper_api_key}&url={url}&render={'false'}"
     else:
         target_url = url
 
