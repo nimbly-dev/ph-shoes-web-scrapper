@@ -1,0 +1,15 @@
+version: "3.9"
+
+services:
+  extractor:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: extractor_service
+    ports:
+      - "10000:10000"
+    environment:
+      - PYTHONUNBUFFERED=1
+    volumes:
+      - .:/app  # Mount your local directory into the container
+    command: uvicorn main:app --host 0.0.0.0 --port 10000 --reload
