@@ -47,7 +47,7 @@ class AdidasExtractor(BaseExtractor):
             paginated_url = f"{full_url}?start={start}"
             print(f"Fetching page: {paginated_url}")
 
-            html = fetch_html(paginated_url, retries=2, timeout=15)
+            html = fetch_html(paginated_url, retries=5, timeout=70)
             if not html:
                 print(f"Failed to load {paginated_url} after retries.")
                 break

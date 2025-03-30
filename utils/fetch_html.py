@@ -1,6 +1,7 @@
 import os
 import time
 import requests
+import random
 from dotenv import load_dotenv
 
 # Load environment variables from .env file
@@ -11,34 +12,50 @@ HEADERS = {
 }
 
 
-def fetch_html(url: str, retries: int = 3, timeout: int = 15) -> str:
+def fetch_html(url: str, retries: int = 3, timeout: int = 30)-> str:
     """
-    Fetch HTML using requests with optional ScraperAPI proxy if enabled.
+    Fetch HTML using requests, optionally using ScraperAPI proxy and fallback.
 
     Environment Variables:
       - USE_SCRAPPER_PROXY: "true" or "false"
       - SCRAPER_API_KEY: Your ScraperAPI key
+      - FALLBACK_DIRECT: "true" or "false" (optional)
     """
-    # Check whether to use proxy via environment variable (defaults to True)
     use_proxy = os.getenv("USE_SCRAPPER_PROXY", "true").lower() in ("true", "1")
-    
-    if use_proxy:
-        # Build the ScraperAPI URL by appending the target URL
-        target_url = f"http://api.scraperapi.com?api_key={os.getenv('SCRAPER_API_KEY')}&url={url}"
-        proxies = None  # Using API URL method, so we don't set proxies
+    fallback_direct = os.getenv("FALLBACK_DIRECT", "true").lower() in ("true", "1")
+    scraper_api_key = os.getenv("SCRAPER_API_KEY")
+
+    if use_proxy and scraper_api_key:
+        target_url = f"https://api.scraperapi.com?api_key={scraper_api_key}&url={url}&render={'true'}"
     else:
         target_url = url
-        proxies = None
 
     for attempt in range(retries):
         try:
             print(f"Attempt {attempt+1}: Fetching {target_url}")
-            response = requests.get(target_url, headers=HEADERS, timeout=timeout, proxies=proxies, verify=False)
+            response = requests.get(target_url, headers=HEADERS, timeout=timeout)
+
             if response.status_code == 200:
                 return response.text
             else:
                 print(f"Attempt {attempt+1}: Received status code {response.status_code} for {url}")
         except Exception as e:
             print(f"Attempt {attempt+1} failed: {e}")
-        time.sleep(2)
+
+        # Exponential backoff with jitter
+        backoff = (2 ** attempt) + random.uniform(0.5, 1.5)
+        time.sleep(backoff)
+
+    # Fallback logic
+    if use_proxy and fallback_direct:
+        print(f"All proxy attempts failed. Falling back to direct request: {url}")
+        try:
+            response = requests.get(url, headers=HEADERS, timeout=timeout, verify=False)
+            if response.status_code == 200:
+                return response.text
+            else:
+                print(f"Fallback direct request failed with status code {response.status_code}")
+        except Exception as e:
+            print(f"Fallback direct request failed: {e}")
+
     return None
