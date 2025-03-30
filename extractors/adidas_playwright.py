@@ -27,14 +27,14 @@ category_config = {
 class AdidasExtractor(BaseExtractor):
     def __init__(self, category_endpoint: str, num_pages: int = -1):
         """
-        :param category_endpoint: Endpoint for a specific category (e.g., "/men-shoes") or "all" to scrape all categories.
-        :param num_pages: Number of pages to process per category (-1 means loop until no products found)
+        :param category_endpoint: Category endpoint (e.g., "/men-shoes") or "all" to scrape all categories.
+        :param num_pages: Number of pages to process per category (-1 means loop until no products found).
         """
         self.category_endpoint = category_endpoint
         self.num_pages = num_pages
 
     def extract(self) -> List[Shoe]:
-        # If category is "all", iterate over all defined categories and aggregate results.
+        # If "all" is passed, loop through every category in the configuration.
         if self.category_endpoint.lower() == "all":
             aggregated_products = []
             for cat in category_config.keys():
@@ -43,34 +43,63 @@ class AdidasExtractor(BaseExtractor):
                 aggregated_products.extend(extractor.extract())
             return aggregated_products
 
-        # Otherwise, scrape the specified category.
+        # Otherwise, proceed with the specified category.
         config = category_config.get(self.category_endpoint, {"gender": [], "age_group": ""})
         current_gender = config["gender"]
         current_age_group = config["age_group"]
         full_url = f"{BASE_URL}{self.category_endpoint}"
         product_list = []
         page_num = 0
-        print(f"Starting extraction for category {self.category_endpoint}...")
+        print(f"Starting extraction for category {self.category_endpoint} using Playwright...")
 
-        while True:
-            start = page_num * 48
-            paginated_url = f"{full_url}?start={start}"
-            print(f"Fetching page: {paginated_url}")
+        with sync_playwright() as p:
+            browser = p.chromium.launch(
+                headless=True,
+                args=[
+                    "--disable-http2",
+                    "--disable-quic",
+                    "--disable-blink-features=AutomationControlled",
+                    "--no-sandbox",
+                    "--disable-dev-shm-usage",
+                    "--disable-setuid-sandbox"
+                ]
+            )
+            context = browser.new_context(ignore_https_errors=True, viewport={"width": 1280, "height": 720})
+            page = context.new_page()
+            # Set extra headers to mimic a real browser
+            page.set_extra_http_headers({
+                "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36"
+            })
 
-            html = fetch_html(paginated_url, retries=5, timeout=70)
-            if not html:
-                print(f"Failed to load {paginated_url} after retries.")
-                break
+            while True:
+                start = page_num * 48
+                paginated_url = f"{full_url}?start={start}"
+                print(f"Fetching page: {paginated_url}")
 
-            soup = BeautifulSoup(html, "html.parser")
-            script_tag = soup.find("script", id="__NEXT_DATA__")
-            if script_tag:
-                data = json.loads(script_tag.string)
+                try:
+                    page.goto(paginated_url, timeout=70000, wait_until="domcontentloaded")
+                except Exception as e:
+                    print(f"Error navigating to {paginated_url}: {e}")
+                    break
+
+                html = page.content()
+                soup = BeautifulSoup(html, "html.parser")
+                script_tag = soup.find("script", id="__NEXT_DATA__")
+                if not script_tag:
+                    print(f"No __NEXT_DATA__ JSON found on {paginated_url}!")
+                    break
+
+                try:
+                    data = json.loads(script_tag.string)
+                except Exception as e:
+                    print(f"Error parsing JSON from {paginated_url}: {e}")
+                    break
+
                 products = data.get("props", {}).get("pageProps", {}).get("products", [])
                 print(f"Found {len(products)} products on page {page_num+1} of {self.category_endpoint}.")
 
                 if not products:
-                    print("No products found. Ending pagination.")
+                    print("No products found. Ending pagination for this category.")
                     break
 
                 for product in products:
@@ -95,15 +124,14 @@ class AdidasExtractor(BaseExtractor):
                         age_group=current_age_group
                     )
                     product_list.append(shoe)
-            else:
-                print(f"No __NEXT_DATA__ JSON found on {paginated_url}!")
-                break
 
-            sleep_time = random.uniform(1, 8)
-            print(f"Sleeping for {sleep_time:.2f} seconds...\n")
-            time.sleep(sleep_time)
-            page_num += 1
-            if self.num_pages != -1 and page_num >= self.num_pages:
-                break
+                sleep_time = random.uniform(1, 8)
+                print(f"Sleeping for {sleep_time:.2f} seconds...\n")
+                time.sleep(sleep_time)
+                page_num += 1
+                if self.num_pages != -1 and page_num >= self.num_pages:
+                    break
+
+            browser.close()
 
         return product_list
