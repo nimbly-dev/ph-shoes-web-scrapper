@@ -27,20 +27,30 @@ category_config = {
 class AdidasExtractor(BaseExtractor):
     def __init__(self, category_endpoint: str, num_pages: int = -1):
         """
-        :param category_endpoint: Endpoint for a specific category (e.g., "/men-shoes")
-        :param num_pages: Number of pages to process (-1 means loop until no products found)
+        :param category_endpoint: Endpoint for a specific category (e.g., "/men-shoes") or "all" to scrape all categories.
+        :param num_pages: Number of pages to process per category (-1 means loop until no products found)
         """
         self.category_endpoint = category_endpoint
         self.num_pages = num_pages
 
     def extract(self) -> List[Shoe]:
+        # If category is "all", iterate over all defined categories and aggregate results.
+        if self.category_endpoint.lower() == "all":
+            aggregated_products = []
+            for cat in category_config.keys():
+                print(f"\n--- Extracting category: {cat} ---")
+                extractor = AdidasExtractor(cat, self.num_pages)
+                aggregated_products.extend(extractor.extract())
+            return aggregated_products
+
+        # Otherwise, scrape the specified category.
         config = category_config.get(self.category_endpoint, {"gender": [], "age_group": ""})
         current_gender = config["gender"]
         current_age_group = config["age_group"]
         full_url = f"{BASE_URL}{self.category_endpoint}"
         product_list = []
         page_num = 0
-        print("Starting extraction with requests...")
+        print(f"Starting extraction for category {self.category_endpoint}...")
 
         while True:
             start = page_num * 48
@@ -57,7 +67,7 @@ class AdidasExtractor(BaseExtractor):
             if script_tag:
                 data = json.loads(script_tag.string)
                 products = data.get("props", {}).get("pageProps", {}).get("products", [])
-                print(f"Found {len(products)} products on page {page_num+1}.")
+                print(f"Found {len(products)} products on page {page_num+1} of {self.category_endpoint}.")
 
                 if not products:
                     print("No products found. Ending pagination.")
