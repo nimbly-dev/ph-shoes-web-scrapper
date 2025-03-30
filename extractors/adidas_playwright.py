@@ -7,6 +7,7 @@ import requests
 from bs4 import BeautifulSoup
 from typing import List
 from .base import Shoe, BaseExtractor
+from playwright.sync_api import sync_playwright
 from utils.proxy import get_scraperapi_proxies
 from utils.fetch_html import fetch_html
 
