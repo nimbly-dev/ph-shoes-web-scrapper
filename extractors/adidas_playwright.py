@@ -7,6 +7,8 @@ import requests
 from bs4 import BeautifulSoup
 from typing import List
 from .base import Shoe, BaseExtractor
+from utils.proxy import get_scraperapi_proxies
+from utils.fetch_html import fetch_html
 
 # Global configuration for Adidas
 BASE_URL = "https://www.adidas.com.ph"
@@ -21,24 +23,6 @@ category_config = {
     '/girls-4_8_years-shoes': {"gender": ["female"], "age_group": "kids"},
     '/1_4_years-shoes': {"gender": ["male", "female"], "age_group": "toddlers"} 
 }
-
-# Use a simple User-Agent that worked for you locally.
-HEADERS = {
-    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36"
-}
-
-def navigate_with_retry(url, retries=3, timeout=15):
-    for attempt in range(retries):
-        try:
-            response = requests.get(url, headers=HEADERS, timeout=timeout)
-            if response.status_code == 200:
-                return response.text
-            else:
-                print(f"Attempt {attempt+1} failed: status code {response.status_code}")
-        except Exception as e:
-            print(f"Attempt {attempt+1} failed: {e}")
-        time.sleep(2)
-    return None
 
 class AdidasExtractor(BaseExtractor):
     def __init__(self, category_endpoint: str, num_pages: int = -1):
@@ -63,7 +47,7 @@ class AdidasExtractor(BaseExtractor):
             paginated_url = f"{full_url}?start={start}"
             print(f"Fetching page: {paginated_url}")
 
-            html = navigate_with_retry(paginated_url, retries=3, timeout=15)
+            html = fetch_html(paginated_url, retries=2, timeout=15)
             if not html:
                 print(f"Failed to load {paginated_url} after retries.")
                 break
