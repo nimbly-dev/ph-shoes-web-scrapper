@@ -2,9 +2,8 @@ FROM python:3.9-slim
 
 WORKDIR /app
 
-# Install minimal system dependencies plus those needed for Chromium
+# Install minimal system dependencies for Playwright (Chromium)
 RUN apt-get update && apt-get install -y \
-    build-essential \
     curl \
     wget \
     gnupg \
@@ -28,19 +27,15 @@ RUN apt-get update && apt-get install -y \
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
-# Install Playwright browsers
-RUN playwright install
-
-# Set the environment variable to persist browser installation
+# Set environment variable for Playwright browsers BEFORE installing them.
 ENV PLAYWRIGHT_BROWSERS_PATH=/app/browsers
-# Install Playwright browsers
-RUN playwright install
 
-# Copy your app code
+# Explicitly install Chromium browsers with dependencies.
+RUN playwright install chromium --with-deps
+
+# Copy application code
 COPY . .
 
-# Default port Render uses (set via ENV variable)
-ENV PORT=10000
+EXPOSE 10000
 
-# Start FastAPI app
 CMD ["uvicorn", "main:app", "--host", "0.0.0.0", "--port", "10000"]
