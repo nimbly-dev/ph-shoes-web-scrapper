@@ -6,7 +6,7 @@ from typing import Optional, List
 from uuid import uuid4
 
 @dataclass
-class Shoe:
+class BaseShoe:
     id: str = field(default_factory=lambda: str(uuid4()))
     title: str = ""
     subTitle: Optional[str] = None
@@ -19,7 +19,7 @@ class Shoe:
 
 class BaseExtractor(ABC):
     @abstractmethod
-    def extract(self) -> List[Shoe]:
+    def extract(self) -> List[BaseShoe]:
         """
         This method should be implemented by each brand-specific extractor.
         It must return a list of Shoe instances.
