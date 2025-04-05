@@ -93,7 +93,7 @@ class AsicsExtractor(BaseExtractor):
         self.num_pages = num_pages
 
     def _fetch_page(self, url: str) -> str:
-        headers = {"User-Agent": "Mozilla/5.0"}
+        headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"}
         response = requests.get(url, headers=headers)
         response.raise_for_status()
         return response.text

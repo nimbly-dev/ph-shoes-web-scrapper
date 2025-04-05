@@ -1,120 +1,98 @@
 import json
 import random
 import time
-from bs4 import BeautifulSoup
+import requests
+from urllib.parse import urljoin
 from typing import List
 from .base import BaseShoe, BaseExtractor
-from utils.fetch_html import fetch_html
-from dataclasses import dataclass
-from typing import Optional, List as TypedList
 
 # Global configuration for Adidas
 BASE_URL = "https://www.adidas.com.ph"
 
-# Category configuration specific to Adidas
+# Updated category configuration keyed by search term.
 category_config = {
-    '/men-shoes': {"gender": ["male"], "age_group": "adult"},
-    '/women-shoes': {"gender": ["female"], "age_group": "adult"},
-    '/boys-8_16_years-shoes': {"gender": ["male"], "age_group": "youth"},
-    '/girls-8_16_years-shoes': {"gender": ["female"], "age_group": "youth"},
-    '/boys-4_8_years-shoes': {"gender": ["male"], "age_group": "kids"},
-    '/girls-4_8_years-shoes': {"gender": ["female"], "age_group": "kids"},
-    '/1_4_years-shoes': {"gender": ["male", "female"], "age_group": "toddlers"} 
+    "men-shoes": {"gender": ["male"], "age_group": "adult"},
+    "women-shoes": {"gender": ["female"], "age_group": "adult"},
+    "boys-shoes": {"gender": ["male"], "age_group": "youth"},
+    "girls-shoes": {"gender": ["female"], "age_group": "youth"},
+    "infants-shoes": {"gender": ["male", "female"], "age_group": "toddlers"}
 }
 
-# Define AdidasShoe with additional fields.
-@dataclass
-class AdidasShoe(BaseShoe):
-    rating: Optional[float] = None
-    ratingCount: Optional[int] = None
-    colourVariations: TypedList = None
+# Use a simple User-Agent that worked for you locally.
+HEADERS = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"}
+        
+def get_api(language: str = "en", start_num: int = 0, search_item: str = "shoes") -> str:
+    """
+    Returns the API URL using the given language, start number, and search item.
+    """
+    return f"{BASE_URL}/api/plp/content-engine?sitePath={language}&query={search_item}&start={start_num}"
 
+def get_json(api: str) -> dict:
+    """
+    Makes a GET request to the API and returns the JSON response.
+    """
+    try:
+        response = requests.get(api, headers=HEADERS)
+        print(f"Fetching API: {api}")
+        if response.status_code != 200:
+            raise Exception(f"Non-200 status code: {response.status_code}")
+        if not response.text.strip():
+            raise Exception("Empty response text")
+        try:
+            data = response.json()
+        except json.JSONDecodeError as json_err:
+            
+            raise Exception(f"JSON decode error: {json_err}\nResponse text: {response.text}") from json_err
+        return data
+    except Exception as e:
+        print(f"Error while requesting {api}: {e}")
+        raise e
+
+# @DeprecationWarning("AdidasExtractor is not working on FastAPI setup, a seperate repository is created for this.")
 class AdidasExtractor(BaseExtractor):
     def __init__(self, category_endpoint: str, num_pages: int = -1):
         """
-        :param category_endpoint: Category endpoint (e.g., "/men-shoes") or "all" to scrape all categories.
-        :param num_pages: Number of pages to process per category (-1 means loop until no products found).
+        :param category_endpoint: Either a specific search term (e.g. "men-shoes")
+                                  or "all" to process all categories.
+        :param num_pages: Number of pages to process (-1 means loop until no products found)
         """
-        self.category_endpoint = category_endpoint
+        self.category_endpoint = category_endpoint.lower()
         self.num_pages = num_pages
 
-    def extract(self) -> List[AdidasShoe]:
-        # If "all" is passed, loop through every category in the configuration.
-        if self.category_endpoint.lower() == "all":
-            aggregated_products = []
-            for cat in category_config.keys():
-                print(f"\n--- Extracting category: {cat} ---")
-                extractor = AdidasExtractor(cat, self.num_pages)
-                aggregated_products.extend(extractor.extract())
-            return aggregated_products
-
-        # Otherwise, proceed with the specified category.
-        config = category_config.get(self.category_endpoint, {"gender": [], "age_group": ""})
-        current_gender = config["gender"]
-        current_age_group = config["age_group"]
-        full_url = f"{BASE_URL}{self.category_endpoint}"
+    def extract_category(self, search_term: str, fixed_config: dict) -> List[BaseShoe]:
+        """
+        Extracts products for a given search term using the fixed configuration.
+        """
+        current_gender = fixed_config["gender"]
+        current_age_group = fixed_config["age_group"]
         product_list = []
         page_num = 0
-        print(f"Starting extraction for category {self.category_endpoint} using plain GET requests...")
+        print(f"Starting extraction for category '{search_term}' using API...")
 
         while True:
             start = page_num * 48
-            paginated_url = f"{full_url}?start={start}"
-            print(f"Fetching page: {paginated_url}")
-
-            html = fetch_html(paginated_url)
-            if not html:
-                print(f"Failed to load {paginated_url} after retries.")
-                break
-
-            soup = BeautifulSoup(html, "html.parser")
-            script_tag = soup.find("script", id="__NEXT_DATA__")
-            if not script_tag:
-                print(f"No __NEXT_DATA__ JSON found on {paginated_url}!")
-                break
-
-            try:
-                data = json.loads(script_tag.string)
-            except Exception as e:
-                print(f"Error parsing JSON from {paginated_url}: {e}")
-                break
-
-            products = data.get("props", {}).get("pageProps", {}).get("products", [])
-            print(f"Found {len(products)} products on page {page_num+1} of {self.category_endpoint}.")
+            api_url = get_api("en", start, search_term)
+            data = get_json(api_url)
+            # Parse products from the JSON; assumed structure is under "raw" -> "itemList" -> "items"
+            products = data.get("raw", {}).get("itemList", {}).get("items", [])
+            print(f"Found {len(products)} products on page {page_num+1} for category '{search_term}'.")
 
             if not products:
-                print("No products found. Ending pagination for this category.")
+                print(f"No products found for '{search_term}'. Ending pagination.")
                 break
 
             for product in products:
-                prices = product.get("priceData", {}).get("prices", [])
-                price_sale = None
-                price_original = None
-                for price in prices:
-                    if price.get("type") == "sale":
-                        price_sale = price.get("value")
-                    elif price.get("type") == "original":
-                        price_original = price.get("value")
-
-                # If sale price is missing or 0, assign original price.
-                if not price_sale:
-                    price_sale = price_original if price_original is not None else 0.0
-
-                shoe = AdidasShoe(
-                    id=product.get("id", ""),
-                    title=product.get("title", ""),
-                    subTitle=product.get("subTitle"),
-                    url=product.get("url", ""),
-                    image=product.get("image"),
-                    price_sale=price_sale,
-                    price_original=price_original,
-                    gender=current_gender,
-                    age_group=current_age_group,
-                    rating=product.get("rating"),
-                    ratingCount=product.get("ratingCount"),
-                    colourVariations=product.get("colourVariations", [])
+                shoe = BaseShoe(
+                    id = product.get("productId", ""),
+                    title = product.get("displayName", ""),
+                    subTitle = product.get("subTitle"),
+                    url = urljoin(BASE_URL, product.get("link", "")),
+                    image = product.get("image", {}).get("src"),
+                    price_sale = product.get("salePrice") if product.get("salePrice") is not None else 0.0,
+                    price_original = product.get("price"),
+                    gender = current_gender,
+                    age_group = current_age_group
                 )
-                
                 product_list.append(shoe)
 
             sleep_time = random.uniform(1, 8)
@@ -125,3 +103,19 @@ class AdidasExtractor(BaseExtractor):
                 break
 
         return product_list
+
+    def extract(self) -> List[BaseShoe]:
+        """
+        If the search term is "all", iterates over every key in category_config.
+        Otherwise, uses the provided search term.
+        """
+        if self.category_endpoint == "all":
+            aggregated = []
+            for search_term, fixed_config in category_config.items():
+                aggregated.extend(self.extract_category(search_term, fixed_config))
+            return aggregated
+        else:
+            fixed_config = category_config.get(
+                self.category_endpoint, {"gender": ["unisex"], "age_group": "adult"}
+            )
+            return self.extract_category(self.category_endpoint, fixed_config)

@@ -1,0 +1,13 @@
+.git
+.vscode
+Thumbs.db
+desktop.ini
+node_modules
+__pycache__
+*.pyc
+*.log
+tmp/
+.data
+.gitignore
+logs
+browsers
