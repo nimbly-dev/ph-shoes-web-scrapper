@@ -1,6 +1,7 @@
 import time
 import re
 import requests
+import concurrent.futures
 from bs4 import BeautifulSoup
 from typing import List
 from dataclasses import dataclass
@@ -9,8 +10,7 @@ from logger import get_logger
 import html
 import json
 
-# Create a logger for this module.
-logger = get_logger(__name__, log_file="./logs/asics_poc.log")
+logger = get_logger(__name__, log_file="./logs/new_balance_poc.log")
 
 # Global configuration for Asics
 BASE_URL = "https://www.asics.com/ph/en-ph"
@@ -80,7 +80,7 @@ PAGE_SIZE = 24
 
 @dataclass
 class AsicsShoe(BaseShoe):
-    # You can add Asics-specific fields here if needed; otherwise, it inherits from BaseShoe.
+    # Inherit from BaseShoe; add any Asics-specific fields if needed.
     pass
 
 class AsicsExtractor(BaseExtractor):
@@ -94,7 +94,7 @@ class AsicsExtractor(BaseExtractor):
 
     def _fetch_page(self, url: str) -> str:
         headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"}
-        response = requests.get(url, headers=headers)
+        response = requests.get(url, headers=headers, timeout=30)
         response.raise_for_status()
         return response.text
 
@@ -111,20 +111,12 @@ class AsicsExtractor(BaseExtractor):
                 prod_id = prod.get('data-itemid')
                 title_elem = prod.find('div', class_='product-name')
                 title = title_elem.text.strip() if title_elem else None
-                # Extract subtitle (if exists)
                 subtitle_elem = prod.select_one(".product-tile__text.product-tile__text--small.xx-small-reg")
                 subtitle = subtitle_elem.text.strip() if subtitle_elem else None
-                # Extract product URL
                 a_tag = prod.find_parent("a", class_="product-tile__link")
                 raw_url = a_tag["href"].strip() if (a_tag and a_tag.has_attr("href")) else None
-                if raw_url and prod_id:
-                    raw_url = raw_url.rstrip("/")
-                    prod_url = f"{raw_url}/{prod_id}.html"
-                else:
-                    prod_url = None
-                # Extract image URL
+                prod_url = f"{raw_url.rstrip('/')}/{prod_id}.html" if (raw_url and prod_id) else None
                 image = self._extract_image_from_prod(prod)
-                # Extract prices
                 sale_price_elem = prod.find('span', class_='price-sales')
                 price_sale = sale_price_elem.text.strip() if sale_price_elem else None
                 original_price_elem = prod.find('span', class_='price-original')
@@ -132,7 +124,6 @@ class AsicsExtractor(BaseExtractor):
                     original_price_elem = prod.find('span', class_='price-standard')
                 price_original = original_price_elem.text.strip() if original_price_elem else price_sale
 
-                # Convert prices to float (remove currency symbols, commas, etc.)
                 def parse_price(p):
                     if p:
                         num = re.sub(r'[^\d.]', '', p)
@@ -144,7 +135,6 @@ class AsicsExtractor(BaseExtractor):
                 if price_sale_val is None:
                     price_sale_val = price_original_val
 
-                # Merge in category configuration details
                 cat_details = category_config.get(category_path, {})
                 record = {
                     "id": prod_id,
@@ -194,7 +184,6 @@ class AsicsExtractor(BaseExtractor):
         """
         Process a single category by paginating through the pages.
         """
-        # Build category URL; ensure trailing slash.
         category_url = f"{BASE_URL}{category_path}/"
         all_shoes = []
         start = 0
@@ -202,11 +191,11 @@ class AsicsExtractor(BaseExtractor):
             paged_url = f"{category_url}?start={start}&sz={PAGE_SIZE}"
             logger.info(f"Fetching: {paged_url}")
             try:
-                html = self._fetch_page(paged_url)
+                html_content = self._fetch_page(paged_url)
             except Exception as e:
                 logger.error(f"Error fetching page {paged_url}: {e}")
                 break
-            shoes = self._extract_products_from_html(html, category_path)
+            shoes = self._extract_products_from_html(html_content, category_path)
             logger.info(f"Found {len(shoes)} products on page starting at {start}")
             if not shoes:
                 break
@@ -214,21 +203,28 @@ class AsicsExtractor(BaseExtractor):
             start += PAGE_SIZE
             if self.num_pages != -1 and start >= self.num_pages * PAGE_SIZE:
                 break
-            time.sleep(1)  # Respectful delay
+            time.sleep(0.25)  # Consider reducing delay if rate limits allow
         return all_shoes
 
     def extract(self) -> List[AsicsShoe]:
         """
-        Process either a specific category or all Asics categories.
+        Process either a specific category or all Asics categories concurrently.
         """
         all_shoes = []
         if self.category.lower() == "all":
             paths = product_lists_url
         else:
             paths = [self.category]
-        for path in paths:
-            logger.info(f"Processing category: {BASE_URL}{path}/")
-            shoes = self._process_category(path)
-            all_shoes.extend(shoes)
-            time.sleep(3)  # Delay between categories
+        
+        # Process each category concurrently using a ThreadPoolExecutor.
+        with concurrent.futures.ThreadPoolExecutor(max_workers=3) as executor:
+            future_to_path = {executor.submit(self._process_category, path): path for path in paths}
+            for future in concurrent.futures.as_completed(future_to_path):
+                path = future_to_path[future]
+                try:
+                    shoes = future.result()
+                    logger.info(f"Completed processing {path}: {len(shoes)} products found.")
+                    all_shoes.extend(shoes)
+                except Exception as exc:
+                    logger.error(f"Error processing category {path}: {exc}")
         return all_shoes

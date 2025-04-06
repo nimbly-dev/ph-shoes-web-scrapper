@@ -192,7 +192,7 @@ class WorldBalanceExtractor(BaseExtractor):
                 page_num += 1
                 if self.num_pages != -1 and page_num >= self.num_pages:
                     break
-                sleep_time = random.uniform(1, 8)
+                sleep_time = random.uniform(1, 2)
                 logger.info(f"Sleeping for {sleep_time:.2f} seconds...")
                 time.sleep(sleep_time)
         return all_shoes

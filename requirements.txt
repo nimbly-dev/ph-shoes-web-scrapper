@@ -2,7 +2,9 @@ fastapi
 uvicorn
 beautifulsoup4
 requests
+requests-html
 python-dotenv
 playwright
 playwright-stealth
 boto3
+lxml_html_clean

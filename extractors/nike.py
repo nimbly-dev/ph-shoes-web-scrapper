@@ -152,6 +152,9 @@ class NikeExtractor(BaseExtractor):
                 shoes = self._process_category(cat, config)
                 all_shoes.extend(shoes)
         else:
-            config = self.CATEGORY_CONFIG.get(self.category, {})
-            all_shoes = self._process_category(self.category, config)
+            cat_path = "/" + self.category if not self.category.startswith("/") else self.category
+            config = self.CATEGORY_CONFIG.get(cat_path)
+            if not config:
+                raise ValueError(f"Invalid or unsupported category: {self.category}")
+            all_shoes = self._process_category(cat_path, config)
         return all_shoes

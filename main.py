@@ -39,8 +39,7 @@ def run_extract(category: str, brand: str = "adidas", pages: int = -1, uploadToS
             "extracted": [asdict(shoe) for shoe in results],
             "s3_upload": f"successful: {s3_key}"
         }
-        print("TEST")
     else:
-        local_file_path = f".data/{file_name}"
-        CSVUtil.write_to_csv(results, local_file_path)
+        # local_file_path = f".data/{file_name}"
+        # CSVUtil.write_to_csv(results, local_file_path)
         return {"extracted": [asdict(shoe) for shoe in results]}

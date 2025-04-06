@@ -199,7 +199,7 @@ class HokaExtractor(BaseExtractor):
             final_products = products
             prev_count = current_count
             sz += page_size
-            time.sleep(1)
+            time.sleep(0.5)
             if self.num_pages != -1 and (sz / page_size) >= self.num_pages:
                 break
         return final_products
@@ -223,7 +223,7 @@ class HokaExtractor(BaseExtractor):
                 for product in products:
                     product["subTitle"] = inferred
             all_products.extend(products)
-            time.sleep(2.5)
+            time.sleep(1)
         shoes = []
         def parse_price(p):
             try:
