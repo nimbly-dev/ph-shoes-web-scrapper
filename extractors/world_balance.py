@@ -66,133 +66,111 @@ headers = {
 # Define the WorldBalanceShoe dataclass.
 @dataclass
 class WorldBalanceShoe(BaseShoe):
-    pass  # Inherit all fields from BaseShoe; extra details (like subtitle) will be stored in subTitle
+    pass
+
 
 class WorldBalanceExtractor(BaseExtractor):
     def __init__(self, category: str = "all", num_pages: int = -1):
-        """
-        :param category: Category endpoint (e.g., '/performance') or 'all' for all categories.
-        :param num_pages: Number of pages per category (-1 means loop until no products are found).
-        """
         self.category = category
         self.num_pages = num_pages
 
     def _extract_products_from_html(self, html: str, category_path: str) -> List[WorldBalanceShoe]:
-        """
-        Extract product details from the HTML of a category page.
-        Returns a list of WorldBalanceShoe instances.
-        """
         soup = BeautifulSoup(html, 'html.parser')
-        shoes = []
-        # Locate product cards (the cards have class "grid-product")
-        product_cards = soup.select('div.grid-product')
-        for card in product_cards:
+        shoes: List[WorldBalanceShoe] = []
+        cards = soup.select('div.product-layout.product-item')
+        logger.info(f"Found {len(cards)} cards in {category_path}")
+
+        for card in cards:
             try:
-                product_id = card.get('data-product-id', '').strip()
-                title_elem = card.select_one('div.grid-product__title')
-                product_name = title_elem.get_text(strip=True) if title_elem else ''
-                link_elem = card.select_one('a.grid-product__link')
-                url_val = link_elem.get('href', '').strip() if link_elem else ''
-                if url_val.startswith('/'):
-                    url_val = 'https://worldbalance.com.ph' + url_val
-                img_elem = card.select_one('img.image-element')
-                image_url = img_elem.get('src', '').strip() if img_elem else ''
-                if image_url.startswith('//'):
-                    image_url = 'https:' + image_url
+                # id
+                pid = None
+                btn = card.select_one('button.quickview')
+                if btn and (info := btn.get('data-productinfo')):
+                    pid = str(json.loads(info)['id'])
 
-                # Process price information.
-                price_container = card.select_one('div.grid-product__price')
-                price_original = None
-                price_sale = None
-                if price_container:
-                    original_elem = price_container.select_one('span.grid-product__price--original')
-                    if original_elem:
-                        orig_text = original_elem.get_text(strip=True)
-                        # Loop over siblings to find the sale price text.
-                        sale_text = ""
-                        for sibling in original_elem.next_siblings:
-                            if isinstance(sibling, str) and sibling.strip():
-                                sale_text = sibling.strip()
-                                break
-                        price_original = float(re.sub(r'[^\d.]', '', orig_text)) if orig_text else None
-                        price_sale = float(re.sub(r'[^\d.]', '', sale_text)) if sale_text else price_original
-                    else:
-                        # Non-sale case: the price container has a single price.
-                        price_text = price_container.get_text(strip=True)
-                        price_original = float(re.sub(r'[^\d.]', '', price_text)) if price_text else None
-                        price_sale = price_original
+                # name & url
+                a = card.select_one('h4.product-name a')
+                name = a.get_text(strip=True) if a else ''
+                href = a['href'] if a and a.has_attr('href') else ''
+                url = href if href.startswith('http') else 'https://worldbalance.com.ph' + href
+
+                # image
+                img = card.select_one('.carousel-inner .item.active img') or card.select_one('.images-container img')
+                img_url = ''
+                if img:
+                    img_url = img.get('data-src') or img.get('src') or ''
+                    if img_url.startswith('//'):
+                        img_url = 'https:' + img_url
+                    elif img_url.startswith('/'):
+                        img_url = 'https://worldbalance.com.ph' + img_url
+
+                # prices
+                def clean(x): return float(re.sub(r'[^\d.]', '', x)) if x else None
+                old_el = card.select_one('p.old-price span.price')
+                new_el = card.select_one('p.regular-price span.price')
+                if old_el and old_el.get_text(strip=True):
+                    po = clean(old_el.text)
+                    ps = clean(new_el.text) if new_el else po
                 else:
-                    price_original = price_sale = None
+                    po = clean(new_el.text if new_el else '')
+                    ps = po
 
-                # Merge in the category details.
-                cat_details = category_config.get(category_path, {})
-                product_data = {
-                    "id": product_id,
-                    "title": product_name,
-                    "subTitle": cat_details.get("subtitle", ""),  # store the category subtitle
-                    "url": url_val,
-                    "image": image_url,
-                    "price_sale": price_sale if price_sale is not None else 0.0,
-                    "price_original": price_original,
-                    "gender": cat_details.get("gender", []),
-                    "age_group": cat_details.get("age_group", "")
+                details = category_config.get(category_path, {})
+                data = {
+                    "id": pid,
+                    "title": name,
+                    "subTitle": details.get("subtitle", ""),
+                    "url": url,
+                    "image": img_url,
+                    "price_sale": ps or 0.0,
+                    "price_original": po,
+                    "gender": details.get("gender", []),
+                    "age_group": details.get("age_group", "")
                 }
-                shoe = WorldBalanceShoe(**product_data)
-                shoes.append(shoe)
+                shoes.append(WorldBalanceShoe(**data))
+
             except Exception as ex:
-                logger.error(f"Error extracting product details: {ex}")
+                logger.error(f"Error extracting product: {ex}")
+
         return shoes
 
-    def _process_category(self, category_path: str) -> List[WorldBalanceShoe]:
-        """
-        Process a single category:
-          1. Build the category URL.
-          2. Fetch the HTML.
-          3. Extract product details.
-        """
-        category_url = BASE_URL + category_path
-        logger.info(f"Processing {category_url} ...")
-        start_time = time.time()
-        response = requests.get(category_url, headers=headers)
-        if response.status_code == 200:
-            html = response.text
-            shoes = self._extract_products_from_html(html, category_path)
-        else:
-            logger.error(f"Failed to fetch {category_url}. Status code: {response.status_code}")
-            shoes = []
-        elapsed = time.time() - start_time
-        logger.info(f"Time taken for {category_path}: {elapsed:.2f} seconds")
-        return shoes
+    def _get_total_pages(self, html: str) -> int:
+        soup = BeautifulSoup(html, 'html.parser')
+        nums = [int(a.text) for a in soup.select('ul.pagination li a') if a.text.isdigit()]
+        return max(nums) if nums else 1
 
     def extract(self) -> List[WorldBalanceShoe]:
-        """
-        Process either a specific category or all World Balance categories using ?page pagination.
-        Pagination is based on the page number (1-indexed).
-        """
-        all_shoes = []
-        if self.category.lower() == "all":
-            paths = product_lists_url
-        else:
-            paths = [self.category]
+        all_shoes: List[WorldBalanceShoe] = []
+        paths = product_lists_url if self.category.lower() == "all" else [self.category]
+
         for path in paths:
-            page_num = 0  # We'll use page_num+1 for ?page=
-            while True:
-                paginated_url = BASE_URL + path + f"?page={page_num+1}"
-                logger.info(f"Fetching page: {paginated_url}")
-                response = requests.get(paginated_url, headers=headers)
-                if response.status_code != 200:
-                    logger.error(f"Failed to fetch {paginated_url}. Status code: {response.status_code}")
+            first = BASE_URL + path
+            logger.info(f"Fetching first page: {first}")
+            resp = requests.get(first, headers=headers)
+            if resp.status_code != 200:
+                logger.error(f"Failed to fetch {first}: {resp.status_code}")
+                continue
+
+            total_pages = self._get_total_pages(resp.text)
+            logger.info(f"Total pages for {path}: {total_pages}")
+
+            for page in range(1, total_pages + 1):
+                url = f"{BASE_URL}{path}?page={page}"
+                logger.info(f"Fetching page {page}: {url}")
+                r = requests.get(url, headers=headers)
+                if r.status_code != 200:
+                    logger.error(f"Failed to fetch {url}: {r.status_code}")
                     break
-                html = response.text
-                shoes = self._extract_products_from_html(html, path)
+
+                shoes = self._extract_products_from_html(r.text, path)
                 if not shoes:
-                    logger.info(f"No products found on page {page_num+1} for {path}. Ending pagination.")
+                    logger.info(f"No products on page {page} for {path}, stopping.")
                     break
+
                 all_shoes.extend(shoes)
-                page_num += 1
-                if self.num_pages != -1 and page_num >= self.num_pages:
+                if 0 <= self.num_pages == page:
                     break
-                sleep_time = random.uniform(1, 2)
-                logger.info(f"Sleeping for {sleep_time:.2f} seconds...")
-                time.sleep(sleep_time)
+
+                time.sleep(random.uniform(1, 2))
+
         return all_shoes
