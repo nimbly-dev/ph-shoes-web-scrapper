@@ -4,6 +4,9 @@ import json
 from bs4 import BeautifulSoup
 from typing import List
 from dataclasses import dataclass
+
+import pandas as pd
+
 from .base import BaseShoe, BaseExtractor
 from logger import get_logger
 from playwright.sync_api import sync_playwright
@@ -17,6 +20,9 @@ class NewBalanceShoe(BaseShoe):
     sold: str = None
     reviews: str = None
     location: str = None
+    gender: List[str] = None
+    age_group: str = None
+    brand: str = None
 
 class NewBalanceExtractor(BaseExtractor):
     def __init__(self, category: str = "all", num_pages: int = -1):
@@ -24,32 +30,23 @@ class NewBalanceExtractor(BaseExtractor):
         self.num_pages = num_pages
 
     def _fetch_page(self, page: int) -> str:
-        if page > 1:
-            url = BASE_SEARCH_URL + f"&page={page}"
-        else:
-            url = BASE_SEARCH_URL
+        url = BASE_SEARCH_URL + (f"&page={page}" if page > 1 else "")
         logger.info(f"Fetching: {url}")
         with sync_playwright() as p:
             browser = p.chromium.launch(headless=True)
             page_obj = browser.new_page()
             page_obj.goto(url, wait_until="domcontentloaded", timeout=60000)
             time.sleep(6)
-            html_content = page_obj.content()
+            html = page_obj.content()
             browser.close()
-        return html_content
+        return html
 
     def _extract_image_url(self, prod) -> str:
-        """
-        Attempt to extract an image URL from the product card.
-        Prioritize any URL that starts with 'https://img.lazcdn.com/'.
-        """
-        # First, search for any <img> tags in the product container.
         images = prod.find_all("img")
         for img in images:
             src = img.get("src") or img.get("data-src")
             if src and src.startswith("https://img.lazcdn.com/"):
                 return src.strip()
-        # Fallback: return first non-base64 image.
         for img in images:
             src = img.get("src") or img.get("data-src")
             if src and not src.startswith("data:"):
@@ -58,78 +55,100 @@ class NewBalanceExtractor(BaseExtractor):
 
     def _parse_products(self, html: str) -> List[dict]:
         soup = BeautifulSoup(html, 'html.parser')
-        product_elements = soup.select("div.Bm3ON[data-qa-locator='product-item']")
-        products = []
-        for prod in product_elements:
+        elems = soup.select("div.Bm3ON[data-qa-locator='product-item']")
+        prods = []
+        for prod in elems:
             try:
-                record = {}
-                record["id"] = prod.get("data-item-id")
-                title_anchor = prod.select_one("div.RfADt a")
-                if title_anchor:
-                    record["title"] = title_anchor.get("title") or title_anchor.text.strip()
-                    url_val = title_anchor.get("href")
-                    if url_val.startswith("//"):
-                        url_val = "https:" + url_val
-                    record["url"] = url_val
+                rec = {}
+                rec["id"] = prod.get("data-item-id")
+                a = prod.select_one("div.RfADt a")
+                if a:
+                    rec["title"] = a.get("title") or a.text.strip()
+                    href = a.get("href", "")
+                    rec["url"] = ("https:" + href) if href.startswith("//") else href
                 else:
-                    record["title"] = ""
-                    record["url"] = ""
-                # Hardcode subtitle as "running"
-                record["subTitle"] = "running"
-                sale_elem = prod.select_one("div.aBrP0 span.ooOxS")
-                if sale_elem:
-                    sale_text = sale_elem.text.strip().replace("₱", "").replace(",", "")
-                    record["price_sale"] = float(re.sub(r'[^\d.]', '', sale_text)) if sale_text else None
-                else:
-                    record["price_sale"] = None
-                orig_elem = prod.select_one("div.WNoq3 span._1m41m del.ooOxS")
-                if orig_elem:
-                    orig_text = orig_elem.text.strip().replace("₱", "").replace(",", "")
-                    record["price_original"] = float(re.sub(r'[^\d.]', '', orig_text)) if orig_text else record["price_sale"]
-                else:
-                    record["price_original"] = record.get("price_sale")
-                sold_elem = prod.select_one("div._6uN7R span._1cEkb span")
-                record["sold"] = sold_elem.text.strip() if sold_elem else "N/A"
-                reviews_elem = prod.select_one("div._6uN7R div.mdmmT._32vUv span.qzqFw")
-                record["reviews"] = reviews_elem.text.strip() if reviews_elem else "N/A"
-                loc_elem = prod.select_one("div._6uN7R span.oa6ri")
-                if loc_elem:
-                    record["location"] = loc_elem.get("title") or loc_elem.text.strip()
-                else:
-                    record["location"] = "N/A"
-                record["image"] = self._extract_image_url(prod)
-                if record.get("id") and record.get("title"):
-                    products.append(record)
+                    rec["title"] = rec["url"] = ""
+                rec["subTitle"] = "running"
+                sale = prod.select_one("div.aBrP0 span.ooOxS")
+                rec["price_sale"] = sale.text if sale else None
+                orig = prod.select_one("div.WNoq3 span._1m41m del.ooOxS")
+                rec["price_original"] = orig.text if orig else rec["price_sale"]
+                sold = prod.select_one("div._6uN7R span._1cEkb span")
+                rec["sold"] = sold.text.strip() if sold else "N/A"
+                rev = prod.select_one("div._6uN7R div.mdmmT._32vUv span.qzqFw")
+                rec["reviews"] = rev.text.strip() if rev else "N/A"
+                loc = prod.select_one("div._6uN7R span.oa6ri")
+                rec["location"] = (loc.get("title") or loc.text.strip()) if loc else "N/A"
+                rec["image"] = self._extract_image_url(prod)
+                prods.append(rec)
             except Exception as e:
                 logger.error(f"Error parsing product: {e}")
-        return products
+        return prods
+
+    def _clean_data(self, df: pd.DataFrame) -> pd.DataFrame:
+        # convert price strings → floats
+        df["price_sale"] = df["price_sale"].astype(str).str.replace(r"[₱,]", "", regex=True).astype(float).fillna(0).clip(lower=0)
+        df["price_original"] = df["price_original"].astype(str).str.replace(r"[₱,]", "", regex=True).astype(float).fillna(0).clip(lower=0)
+        # add static attrs
+        df["gender"] = [['unisex'] for _ in range(len(df))]
+        df["age_group"] = "adult"
+        df["brand"] = "new balance"
+        # dedupe
+        return df.drop_duplicates(subset=["id"], keep="first")
+
+    def _run_data_quality_tests(self, df: pd.DataFrame) -> bool:
+        ok = True
+        # required columns
+        req = ["id","title","url","price_sale","price_original","sold","reviews","location","gender","age_group","brand"]
+        missing = [c for c in req if c not in df.columns]
+        if missing:
+            logger.error(f"Missing columns: {missing}")
+            ok = False
+        # id not null
+        if df["id"].isnull().any():
+            logger.error("Null id values found")
+            ok = False
+        # no nulls
+        nulls = df.isnull().sum()[lambda x: x>0].to_dict()
+        if nulls:
+            logger.error(f"Nulls present: {nulls}")
+            ok = False
+        # price numeric
+        for col in ["price_sale","price_original"]:
+            if not pd.api.types.is_float_dtype(df[col]):
+                logger.error(f"{col} not float dtype")
+                ok = False
+        if ok:
+            logger.info("Data quality tests passed")
+        else:
+            logger.error("Data quality tests failed")
+        return ok
 
     def extract(self) -> List[NewBalanceShoe]:
-        all_products = []
+        all_recs = []
         page = 1
-        prev_count = 0
+        prev = 0
         while True:
             try:
-                html_content = self._fetch_page(page)
+                html = self._fetch_page(page)
             except Exception as e:
-                logger.error(f"Error fetching page {page}: {e}")
+                logger.error(f"Fetch error page {page}: {e}")
                 break
-            products = self._parse_products(html_content)
-            current_count = len(products)
-            logger.info(f"Page {page}: found {current_count} product(s)")
-            if current_count == 0 or current_count == prev_count:
+            recs = self._parse_products(html)
+            if not recs or len(recs) == prev:
                 break
-            all_products.extend(products)
-            prev_count = current_count
+            all_recs.extend(recs)
+            prev = len(recs)
             page += 1
             if self.num_pages != -1 and page > self.num_pages:
                 break
             time.sleep(2)
+
+        df = pd.DataFrame(all_recs)
+        df_clean = self._clean_data(df)
+        self._run_data_quality_tests(df_clean)
+
         shoes = []
-        for rec in all_products:
-            try:
-                shoe = NewBalanceShoe(**rec)
-                shoes.append(shoe)
-            except Exception as e:
-                logger.error(f"Error creating NewBalanceShoe: {e}")
+        for rec in df_clean.to_dict(orient="records"):
+            shoes.append(NewBalanceShoe(**rec))
         return shoes

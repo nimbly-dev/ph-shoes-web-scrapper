@@ -31,7 +31,7 @@ def run_extract(category: str, brand: str = "adidas", pages: int = -1, uploadToS
     
     results = extractor.extract()
     
-    file_name = f"{brand}_extracted.csv"
+    file_name = f"{brand}_all_extracted.csv"
 
     if uploadToS3:
         s3_key = CSVUtil.upload_to_s3(results, file_name)

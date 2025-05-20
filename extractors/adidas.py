@@ -1,121 +1,128 @@
 import json
 import random
 import time
+import re
 import requests
+import pandas as pd
 from urllib.parse import urljoin
-from typing import List
+from typing import List, Optional
+from dataclasses import dataclass
+
 from .base import BaseShoe, BaseExtractor
 
-# Global configuration for Adidas
-BASE_URL = "https://www.adidas.com.ph"
+# --- Data class for Adidas shoes ---
+@dataclass
+class AdidasShoe(BaseShoe):
+    # now accepts brand
+    brand: Optional[str] = None
 
-# Updated category configuration keyed by search term.
-category_config = {
-    "men-shoes": {"gender": ["male"], "age_group": "adult"},
-    "women-shoes": {"gender": ["female"], "age_group": "adult"},
-    "boys-shoes": {"gender": ["male"], "age_group": "youth"},
-    "girls-shoes": {"gender": ["female"], "age_group": "youth"},
-    "infants-shoes": {"gender": ["male", "female"], "age_group": "toddlers"}
-}
-
-# Use a simple User-Agent that worked for you locally.
-HEADERS = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"}
-        
-def get_api(language: str = "en", start_num: int = 0, search_item: str = "shoes") -> str:
-    """
-    Returns the API URL using the given language, start number, and search item.
-    """
-    return f"{BASE_URL}/api/plp/content-engine?sitePath={language}&query={search_item}&start={start_num}"
-
-def get_json(api: str) -> dict:
-    """
-    Makes a GET request to the API and returns the JSON response.
-    """
-    try:
-        response = requests.get(api, headers=HEADERS)
-        print(f"Fetching API: {api}")
-        if response.status_code != 200:
-            raise Exception(f"Non-200 status code: {response.status_code}")
-        if not response.text.strip():
-            raise Exception("Empty response text")
-        try:
-            data = response.json()
-        except json.JSONDecodeError as json_err:
-            
-            raise Exception(f"JSON decode error: {json_err}\nResponse text: {response.text}") from json_err
-        return data
-    except Exception as e:
-        print(f"Error while requesting {api}: {e}")
-        raise e
-
-# @DeprecationWarning("AdidasExtractor is not working on FastAPI setup, a seperate repository is created for this.")
+# --- Extractor ---
 class AdidasExtractor(BaseExtractor):
+    BASE_URL = "https://www.adidas.com.ph"
+    HEADERS = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"}
+    CATEGORY_CONFIG = {
+        "men-shoes":     {"gender": ["male"],           "age_group": "adult"},
+        "women-shoes":   {"gender": ["female"],         "age_group": "adult"},
+        "boys-shoes":    {"gender": ["male"],           "age_group": "youth"},
+        "girls-shoes":   {"gender": ["female"],         "age_group": "youth"},
+        "infants-shoes": {"gender": ["male","female"],  "age_group": "toddlers"}
+    }
+
     def __init__(self, category_endpoint: str, num_pages: int = -1):
-        """
-        :param category_endpoint: Either a specific search term (e.g. "men-shoes")
-                                  or "all" to process all categories.
-        :param num_pages: Number of pages to process (-1 means loop until no products found)
-        """
         self.category_endpoint = category_endpoint.lower()
         self.num_pages = num_pages
 
-    def extract_category(self, search_term: str, fixed_config: dict) -> List[BaseShoe]:
-        """
-        Extracts products for a given search term using the fixed configuration.
-        """
-        current_gender = fixed_config["gender"]
-        current_age_group = fixed_config["age_group"]
-        product_list = []
-        page_num = 0
-        print(f"Starting extraction for category '{search_term}' using API...")
+    def _get_api_url(self, start: int, search_term: str) -> str:
+        return (
+            f"{self.BASE_URL}/api/plp/content-engine?"
+            f"sitePath=en&query={search_term}&start={start}"
+        )
 
+    def _fetch_json(self, url: str) -> dict:
+        r = requests.get(url, headers=self.HEADERS, timeout=30)
+        r.raise_for_status()
+        return r.json()
+
+    def _extract_raw(self, search_term: str, config: dict) -> List[AdidasShoe]:
+        shoes = []
+        page = 0
         while True:
-            start = page_num * 48
-            api_url = get_api("en", start, search_term)
-            data = get_json(api_url)
-            # Parse products from the JSON; assumed structure is under "raw" -> "itemList" -> "items"
-            products = data.get("raw", {}).get("itemList", {}).get("items", [])
-            print(f"Found {len(products)} products on page {page_num+1} for category '{search_term}'.")
-
-            if not products:
-                print(f"No products found for '{search_term}'. Ending pagination.")
+            start = page * 48
+            api = self._get_api_url(start, search_term)
+            data = self._fetch_json(api)
+            items = data.get("raw", {}).get("itemList", {}).get("items", [])
+            if not items or (self.num_pages != -1 and page >= self.num_pages):
                 break
+            for p in items:
+                shoes.append(AdidasShoe(
+                    id             = p.get("productId",""),
+                    title          = p.get("displayName",""),
+                    subTitle       = p.get("subTitle"),
+                    url            = urljoin(self.BASE_URL, p.get("link","")),
+                    image          = p.get("image",{}).get("src"),
+                    price_sale     = p.get("salePrice") or 0.0,
+                    price_original = p.get("price") or 0.0,
+                    gender         = config["gender"],
+                    age_group      = config["age_group"],
+                    brand          = "adidas"              # set brand here directly
+                ))
+            time.sleep(random.uniform(1,3))
+            page += 1
+        return shoes
 
-            for product in products:
-                shoe = BaseShoe(
-                    id = product.get("productId", ""),
-                    title = product.get("displayName", ""),
-                    subTitle = product.get("subTitle"),
-                    url = urljoin(BASE_URL, product.get("link", "")),
-                    image = product.get("image", {}).get("src"),
-                    price_sale = product.get("salePrice") if product.get("salePrice") is not None else 0.0,
-                    price_original = product.get("price"),
-                    gender = current_gender,
-                    age_group = current_age_group
-                )
-                product_list.append(shoe)
+    def _clean_data(self, df: pd.DataFrame) -> pd.DataFrame:
+        # normalize gender lists
+        df["gender"] = df["gender"].apply(lambda g: [x.lower() for x in g] if isinstance(g,list) else [])
+        # fill numeric nulls
+        for col in ["price_sale","price_original"]:
+            df[col] = pd.to_numeric(df[col], errors="coerce").fillna(0).clip(lower=0)
+        # merge duplicate IDs
+        def merge_group(g):
+            base = g.iloc[0].to_dict()
+            genders = set(x for lst in g["gender"] for x in lst)
+            base["gender"] = ["unisex"] if {"male","female"}.issubset(genders) else sorted(genders)
+            return pd.Series(base)
+        df = df.groupby("id", as_index=False).apply(merge_group)
+        return df
 
-            sleep_time = random.uniform(1, 8)
-            print(f"Sleeping for {sleep_time:.2f} seconds...\n")
-            time.sleep(sleep_time)
-            page_num += 1
-            if self.num_pages != -1 and page_num >= self.num_pages:
-                break
+    def _run_data_quality_tests(self, df: pd.DataFrame) -> bool:
+        ok = True
+        # no nulls in price columns
+        for col in ["price_sale","price_original"]:
+            n = df[col].isnull().sum()
+            if n:
+                print(f"DQ Fail: {col} has {n} nulls")
+                ok = False
+        # gender normalization
+        for _,r in df.iterrows():
+            g = r["gender"]
+            if isinstance(g,list) and "male" in g and "female" in g and g!=["unisex"]:
+                print(f"DQ Fail: id {r['id']} gender {g}")
+                ok = False
+        # non-negative
+        for col in ["price_sale","price_original"]:
+            neg = (df[col]<0).sum()
+            if neg:
+                print(f"DQ Fail: {neg} negative in {col}")
+                ok = False
+        print("DQ Passed" if ok else "DQ Failed")
+        return ok
 
-        return product_list
-
-    def extract(self) -> List[BaseShoe]:
-        """
-        If the search term is "all", iterates over every key in category_config.
-        Otherwise, uses the provided search term.
-        """
+    def extract(self) -> List[AdidasShoe]:
         if self.category_endpoint == "all":
-            aggregated = []
-            for search_term, fixed_config in category_config.items():
-                aggregated.extend(self.extract_category(search_term, fixed_config))
-            return aggregated
+            terms = list(self.CATEGORY_CONFIG.keys())
         else:
-            fixed_config = category_config.get(
-                self.category_endpoint, {"gender": ["unisex"], "age_group": "adult"}
-            )
-            return self.extract_category(self.category_endpoint, fixed_config)
+            terms = [self.category_endpoint]
+
+        all_shoes: List[AdidasShoe] = []
+        for term in terms:
+            cfg = self.CATEGORY_CONFIG.get(term, {"gender":[],"age_group":""})
+            all_shoes.extend(self._extract_raw(term, cfg))
+
+        # clean & test
+        df = pd.DataFrame([s.__dict__ for s in all_shoes])
+        df_clean = self._clean_data(df)
+        self._run_data_quality_tests(df_clean)
+
+        # reconstruct dataclasses (brand now accepted)
+        return [AdidasShoe(**rec) for rec in df_clean.to_dict("records")]

@@ -8,3 +8,4 @@ playwright
 playwright-stealth
 boto3
 lxml_html_clean
+pandas

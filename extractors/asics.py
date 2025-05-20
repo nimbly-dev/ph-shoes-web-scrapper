@@ -2,63 +2,40 @@ import time
 import re
 import requests
 import concurrent.futures
+import html
+import json
+import pandas as pd
 from bs4 import BeautifulSoup
 from typing import List
 from dataclasses import dataclass
+from typing import Optional
+
 from .base import BaseShoe, BaseExtractor
 from logger import get_logger
-import html
-import json
 
-logger = get_logger(__name__, log_file="./logs/new_balance_poc.log")
+logger = get_logger(__name__, log_file="./logs/asics_poc.log")
 
-# Global configuration for Asics
 BASE_URL = "https://www.asics.com/ph/en-ph"
-# List of category endpoints to process
-product_lists_url = [
-    # MEN
-    '/running013',
-    '/sportstyle013',
-    '/indoor013',
-    '/volleyball013',
-    '/tennis013',
-    '/trailrunning013',
-    '/basketball013',
-    '/soccer013',
-    '/basketball013',
-    '/cricket013',
-    '/others013',
-    # WOMEN
-    '/running023',
-    '/sportstyle023',
-    '/indoor023',
-    '/volleyball023',
-    '/netball023',
-    '/tennis023',
-    '/trailrunning023',
-    '/basketball023',
+PRODUCT_LISTS = [
+    '/running013', '/sportstyle013', '/indoor013', '/volleyball013',
+    '/tennis013', '/trailrunning013', '/basketball013', '/soccer013',
+    '/cricket013', '/others013',
+    '/running023', '/sportstyle023', '/indoor023', '/volleyball023',
+    '/netball023', '/tennis023', '/trailrunning023', '/basketball023',
     '/soccer023',
-    # KIDS
-    '/running033',
-    '/kids-indoor-shoes',
-    '/kids-tennis-shoes',
-    '/casual033'
+    '/running033', '/kids-indoor-shoes', '/kids-tennis-shoes', '/casual033'
 ]
-
-# Category configuration with extra details
-category_config = {
-    # MALE
-    '/running013': {"gender": ["male"], "age_group": "adult"},
-    '/sportstyle013': {"gender": ["male"], "age_group": "adult"},
-    '/indoor013': {"gender": ["male"], "age_group": "adult"},
-    '/volleyball013': {"gender": ["male"], "age_group": "adult"},
-    '/tennis013': {"gender": ["male"], "age_group": "adult"},
-    '/trailrunning013': {"gender": ["male"], "age_group": "adult"},
-    '/basketball013': {"gender": ["male"], "age_group": "adult"},
-    '/soccer013': {"gender": ["male"], "age_group": "adult"},
-    '/cricket013': {"gender": ["male"], "age_group": "adult"},
-    '/others013': {"gender": ["male"], "age_group": "adult"},
-    # FEMALE
+CATEGORY_CONFIG = {
+    '/running013': {"gender": ["male"],   "age_group": "adult"},
+    '/sportstyle013': {"gender": ["male"],   "age_group": "adult"},
+    '/indoor013': {"gender": ["male"],   "age_group": "adult"},
+    '/volleyball013': {"gender": ["male"],   "age_group": "adult"},
+    '/tennis013': {"gender": ["male"],   "age_group": "adult"},
+    '/trailrunning013': {"gender": ["male"],   "age_group": "adult"},
+    '/basketball013': {"gender": ["male"],   "age_group": "adult"},
+    '/soccer013': {"gender": ["male"],   "age_group": "adult"},
+    '/cricket013': {"gender": ["male"],   "age_group": "adult"},
+    '/others013': {"gender": ["male"],   "age_group": "adult"},
     '/running023': {"gender": ["female"], "age_group": "adult"},
     '/sportstyle023': {"gender": ["female"], "age_group": "adult"},
     '/indoor023': {"gender": ["female"], "age_group": "adult"},
@@ -68,163 +45,154 @@ category_config = {
     '/trailrunning023': {"gender": ["female"], "age_group": "adult"},
     '/basketball023': {"gender": ["female"], "age_group": "adult"},
     '/soccer023': {"gender": ["female"], "age_group": "adult"},
-    # KIDS
     '/running033': {"gender": ["unisex"], "age_group": "youth"},
     '/kids-indoor-shoes': {"gender": ["unisex"], "age_group": "youth"},
     '/kids-tennis-shoes': {"gender": ["unisex"], "age_group": "youth"},
     '/casual033': {"gender": ["unisex"], "age_group": "youth"}
 }
-
-# Page size for pagination
 PAGE_SIZE = 24
 
 @dataclass
 class AsicsShoe(BaseShoe):
-    # Inherit from BaseShoe; add any Asics-specific fields if needed.
     pass
+
 
 class AsicsExtractor(BaseExtractor):
     def __init__(self, category: str = "all", num_pages: int = -1):
-        """
-        :param category: Category endpoint (e.g., '/running013') or 'all' for all categories.
-        :param num_pages: Number of pages per category (-1 means loop until no products are found).
-        """
         self.category = category
         self.num_pages = num_pages
 
     def _fetch_page(self, url: str) -> str:
         headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"}
-        response = requests.get(url, headers=headers, timeout=30)
-        response.raise_for_status()
-        return response.text
+        r = requests.get(url, headers=headers, timeout=30)
+        r.raise_for_status()
+        return r.text
 
-    def _extract_products_from_html(self, html: str, category_path: str) -> List[AsicsShoe]:
-        """
-        Extract product details from the HTML of a category page.
-        Returns a list of AsicsShoe instances.
-        """
-        soup = BeautifulSoup(html, 'html.parser')
-        products = soup.find_all('div', class_='product-tile')
-        shoes = []
-        for prod in products:
+    def _extract_image(self, prod) -> Optional[str]:
+        img = prod.find("img", class_="product-tile__image")
+        if img:
+            src = img.get("data-src-load-more") or img.get("src")
+            if src and not src.startswith("data:"):
+                return src.strip()
+        # fallback via data-alt-image
+        if img and img.has_attr("data-alt-image"):
             try:
-                prod_id = prod.get('data-itemid')
+                alt = json.loads(html.unescape(img["data-alt-image"]))
+                return alt.get("src", "").strip()
+            except Exception:
+                pass
+        # final fallback template
+        pid = prod.get("data-itemid")
+        if pid:
+            parts = pid.split("-")
+            if len(parts) == 2:
+                return f"https://images.asics.com/is/image/asics/{parts[0]}_{parts[1]}_SR_RT_AJP?$productlist$"
+        return None
+
+    def _extract_products(self, html: str, path: str) -> List[AsicsShoe]:
+        soup = BeautifulSoup(html, 'html.parser')
+        tiles = soup.find_all('div', class_='product-tile')
+        shoes = []
+        for prod in tiles:
+            try:
+                pid = prod.get("data-itemid")
                 title_elem = prod.find('div', class_='product-name')
                 title = title_elem.text.strip() if title_elem else None
-                subtitle_elem = prod.select_one(".product-tile__text.product-tile__text--small.xx-small-reg")
+                subtitle_elem = prod.select_one(".product-tile__text--small")
                 subtitle = subtitle_elem.text.strip() if subtitle_elem else None
-                a_tag = prod.find_parent("a", class_="product-tile__link")
-                raw_url = a_tag["href"].strip() if (a_tag and a_tag.has_attr("href")) else None
-                prod_url = f"{raw_url.rstrip('/')}/{prod_id}.html" if (raw_url and prod_id) else None
-                image = self._extract_image_from_prod(prod)
-                sale_price_elem = prod.find('span', class_='price-sales')
-                price_sale = sale_price_elem.text.strip() if sale_price_elem else None
-                original_price_elem = prod.find('span', class_='price-original')
-                if not original_price_elem:
-                    original_price_elem = prod.find('span', class_='price-standard')
-                price_original = original_price_elem.text.strip() if original_price_elem else price_sale
-
-                def parse_price(p):
+                link = prod.find_parent("a", class_="product-tile__link")
+                url = link["href"].strip() if link and link.has_attr("href") else None
+                url = f"{BASE_URL}{url}" if url and url.startswith("/") else url
+                sale_elem = prod.find('span', class_='price-sales')
+                orig_elem = prod.find('span', class_='price-original') or prod.find('span', class_='price-standard')
+                def parse(p):
                     if p:
-                        num = re.sub(r'[^\d.]', '', p)
-                        return float(num) if num else None
+                        n = re.sub(r'[^\d.]', '', p.text if hasattr(p, 'text') else str(p))
+                        return float(n) if n else None
                     return None
-
-                price_sale_val = parse_price(price_sale)
-                price_original_val = parse_price(price_original)
-                if price_sale_val is None:
-                    price_sale_val = price_original_val
-
-                cat_details = category_config.get(category_path, {})
-                record = {
-                    "id": prod_id,
+                ps = parse(sale_elem)
+                po = parse(orig_elem) or ps
+                cfg = CATEGORY_CONFIG.get(path, {})
+                rec = {
+                    "id": pid,
                     "title": title,
                     "subTitle": subtitle,
-                    "url": prod_url,
-                    "image": image,
-                    "price_sale": price_sale_val if price_sale_val is not None else 0.0,
-                    "price_original": price_original_val,
-                    "gender": cat_details.get("gender", []),
-                    "age_group": cat_details.get("age_group", "")
+                    "url": url,
+                    "image": self._extract_image(prod),
+                    "price_sale": ps or 0.0,
+                    "price_original": po,
+                    "gender": cfg.get("gender", []),
+                    "age_group": cfg.get("age_group", "")
                 }
-                shoe = AsicsShoe(**record)
-                shoes.append(shoe)
-            except Exception as ex:
-                logger.error(f"Error extracting product details: {ex}")
+                shoes.append(AsicsShoe(**rec))
+            except Exception as e:
+                logger.error(f"Error extracting tile: {e}")
         return shoes
 
-    def _extract_image_from_prod(self, prod) -> str:
-        """
-        Extract the product image URL from a product tile.
-        """
-        img_elem = prod.find("img", class_="product-tile__image")
-        candidate = None
-        if img_elem:
-            candidate = img_elem.get("data-src-load-more", "").strip()
-            if candidate.startswith("data:") or len(candidate) < 30:
-                candidate = img_elem.get("src", "").strip()
-                if candidate.startswith("data:") or len(candidate) < 30:
-                    candidate = None
-            if not candidate and img_elem.has_attr("data-alt-image"):
-                alt_img_str = html.unescape(img_elem["data-alt-image"])
-                try:
-                    alt_data = json.loads(alt_img_str)
-                    candidate = alt_data.get("src")
-                except Exception:
-                    candidate = None
-        if (not candidate or len(candidate) < 30) and prod.get("data-itemid"):
-            prod_id = prod.get("data-itemid")
-            parts = prod_id.split("-")
-            if len(parts) == 2:
-                first, second = parts
-                candidate = f"https://images.asics.com/is/image/asics/{first}_{second}_SR_RT_AJP?$productlist$"
-        return candidate
-
-    def _process_category(self, category_path: str) -> List[AsicsShoe]:
-        """
-        Process a single category by paginating through the pages.
-        """
-        category_url = f"{BASE_URL}{category_path}/"
+    def _process_category(self, path: str) -> List[AsicsShoe]:
+        url_base = f"{BASE_URL}{path}/"
         all_shoes = []
         start = 0
         while True:
-            paged_url = f"{category_url}?start={start}&sz={PAGE_SIZE}"
-            logger.info(f"Fetching: {paged_url}")
-            try:
-                html_content = self._fetch_page(paged_url)
-            except Exception as e:
-                logger.error(f"Error fetching page {paged_url}: {e}")
-                break
-            shoes = self._extract_products_from_html(html_content, category_path)
-            logger.info(f"Found {len(shoes)} products on page starting at {start}")
+            url = f"{url_base}?start={start}&sz={PAGE_SIZE}"
+            logger.info(f"Fetching {url}")
+            html = self._fetch_page(url)
+            shoes = self._extract_products(html, path)
+            logger.info(f"Found {len(shoes)} on start={start}")
             if not shoes:
                 break
             all_shoes.extend(shoes)
             start += PAGE_SIZE
-            if self.num_pages != -1 and start >= self.num_pages * PAGE_SIZE:
+            if self.num_pages != -1 and start >= PAGE_SIZE * self.num_pages:
                 break
-            time.sleep(0.25)  # Consider reducing delay if rate limits allow
+            time.sleep(0.25)
         return all_shoes
 
-    def extract(self) -> List[AsicsShoe]:
-        """
-        Process either a specific category or all Asics categories concurrently.
-        """
-        all_shoes = []
-        if self.category.lower() == "all":
-            paths = product_lists_url
+    def _clean_data(self, df: pd.DataFrame) -> pd.DataFrame:
+        df['price_sale'] = pd.to_numeric(df['price_sale'], errors='coerce').fillna(0).clip(lower=0)
+        df['price_original'] = pd.to_numeric(df['price_original'], errors='coerce').fillna(0).clip(lower=0)
+        df['gender'] = df['gender'].apply(lambda g: [x.lower() for x in g] if isinstance(g, list) else [])
+        df = df.dropna(subset=['id'])
+        df = df.drop_duplicates(subset=['id'], keep='first')
+        return df
+
+    def _run_data_quality_tests(self, df: pd.DataFrame) -> bool:
+        ok = True
+        # no nulls
+        nulls = df.isnull().sum()[lambda x: x>0].to_dict()
+        if nulls:
+            logger.error(f"Nulls found: {nulls}")
+            ok = False
+        # prices numeric
+        for col in ['price_sale','price_original']:
+            if not pd.api.types.is_numeric_dtype(df[col]):
+                logger.error(f"{col} not numeric")
+                ok = False
+        # unique id
+        if not df['id'].is_unique:
+            logger.error("Duplicate ids found")
+            ok = False
+        if ok:
+            logger.info("Data quality tests passed")
         else:
-            paths = [self.category]
-        
-        # Process each category concurrently using a ThreadPoolExecutor.
-        with concurrent.futures.ThreadPoolExecutor(max_workers=3) as executor:
-            future_to_path = {executor.submit(self._process_category, path): path for path in paths}
-            for future in concurrent.futures.as_completed(future_to_path):
-                path = future_to_path[future]
+            logger.error("Data quality tests failed")
+        return ok
+
+    def extract(self) -> List[AsicsShoe]:
+        paths = PRODUCT_LISTS if self.category.lower() == "all" else [self.category]
+        all_shoes: List[AsicsShoe] = []
+        with concurrent.futures.ThreadPoolExecutor(max_workers=3) as ex:
+            futures = {ex.submit(self._process_category, p): p for p in paths}
+            for f in concurrent.futures.as_completed(futures):
+                p = futures[f]
                 try:
-                    shoes = future.result()
-                    logger.info(f"Completed processing {path}: {len(shoes)} products found.")
-                    all_shoes.extend(shoes)
-                except Exception as exc:
-                    logger.error(f"Error processing category {path}: {exc}")
-        return all_shoes
+                    result = f.result()
+                    logger.info(f"{p} → {len(result)} shoes")
+                    all_shoes.extend(result)
+                except Exception as e:
+                    logger.error(f"Category {p} failed: {e}")
+
+        df = pd.DataFrame([s.__dict__ for s in all_shoes])
+        df_clean = self._clean_data(df)
+        self._run_data_quality_tests(df_clean)
+        return [AsicsShoe(**rec) for rec in df_clean.to_dict('records')]
