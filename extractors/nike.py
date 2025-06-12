@@ -1,3 +1,5 @@
+# nike.py
+
 import json
 import re
 import time
@@ -15,6 +17,7 @@ logger = get_logger(__name__, log_file="./logs/nike_poc.log")
 
 @dataclass
 class NikeShoe(BaseShoe):
+    brand: str = "nike"
     colordescription: Optional[str] = None
     out_of_stock: Optional[bool] = False
     best_seller: Optional[bool] = False
@@ -83,6 +86,7 @@ class NikeExtractor(BaseExtractor):
             'image':             product.get('colorwayImages', {}).get('portraitURL'),
             'price_original':    product.get('prices', {}).get('initialPrice', 0.0),
             'price_sale':        product.get('prices', {}).get('currentPrice', 0.0),
+            'brand':             product.get('brand', {}).get('name', 'nike').lower(),
             'colordescription':  product.get('displayColors', {}).get('colorDescription'),
             'out_of_stock':      any("OUT_OF_STOCK" in a for a in (product.get('featuredAttributes') or [])),
             'best_seller':       any("BEST_SELLER"  in a for a in (product.get('featuredAttributes') or []))
@@ -123,6 +127,7 @@ class NikeExtractor(BaseExtractor):
                 price_original=d['price_original'],
                 gender=config.get("gender", []),
                 age_group=config.get("age_group", ""),
+                brand=d['brand'],
                 colordescription=d['colordescription'],
                 out_of_stock=d['out_of_stock'],
                 best_seller=d['best_seller']
@@ -132,8 +137,19 @@ class NikeExtractor(BaseExtractor):
         return shoes
 
     def _clean_data(self, df: pd.DataFrame) -> pd.DataFrame:
-        df['price_sale']     = df['price_sale'].fillna(0)
-        df['price_original'] = df['price_original'].fillna(0)
+        df['brand'] = df['brand'].str.lower().str.strip()
+        df['image'] = df['image'].fillna("")   
+
+        
+        # 1) Filter out any row where title OR subTitle contains "sportswear" or "tshirt"
+        pattern = r"(sportswear|tshirt)"
+        mask_title    = ~df["title"].str.contains(pattern, case=False, na=False)
+        mask_subtitle = ~df["subTitle"].str.contains(pattern, case=False, na=False)
+        df = df[mask_title & mask_subtitle]
+
+        # 2) Existing null‐and‐negative‐price handling
+        df["price_sale"]     = df["price_sale"].fillna(0)
+        df["price_original"] = df["price_original"].fillna(0)
 
         def norm_gender(g):
             if isinstance(g, list) and 'male' in g and 'female' in g:

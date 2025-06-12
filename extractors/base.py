@@ -11,11 +11,12 @@ class BaseShoe:
     title: str = ""
     subTitle: Optional[str] = None
     url: str = ""
-    image: Optional[str] = None
+    image: Optional[str] = ""
     price_sale: float = 0.0
     price_original: Optional[float] = None
     gender: List[str] = field(default_factory=list)
     age_group: Optional[str] = "adult"
+    brand: str = "unknown"
 
 class BaseExtractor(ABC):
     @abstractmethod

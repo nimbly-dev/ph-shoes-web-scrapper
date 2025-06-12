@@ -1,154 +1,299 @@
-import time
+# extractors/new_balance.py
+
 import re
-import json
-from bs4 import BeautifulSoup
-from typing import List
+import time
 from dataclasses import dataclass
+from typing import List, Dict
+from urllib.parse import urlparse, parse_qs
 
 import pandas as pd
+import requests
+from bs4 import BeautifulSoup
 
 from .base import BaseShoe, BaseExtractor
 from logger import get_logger
-from playwright.sync_api import sync_playwright
 
 logger = get_logger(__name__, log_file="./logs/new_balance_poc.log")
 
-BASE_SEARCH_URL = "https://www.lazada.com.ph/new-alance-st-re/?q=All-Products&from=wangpu&langFlag=en&pageTypeId=2"
+# 1) Build the list of filtered endpoints for Atmos New Balance
+male_sizes = [
+    "4", "4.5", "5", "5.5", "6", "6.5", "7", "7.5",
+    "8", "8.5", "9", "9.5", "10", "10.5", "11",
+    "11.5", "12", "12.5", "13"
+]
+female_sizes = [
+    "5", "5.5", "6", "6.5", "7", "7.5",
+    "8", "8.5", "9", "9.5", "10"
+]
+
+product_lists_url: List[str] = []
+
+# Size‐filtered URLs (Men’s sizes)
+for size in male_sizes:
+    product_lists_url.append(
+        f"/collections/new-balance?filter.v.option.size=US+M+{size}"
+    )
+
+# Size‐filtered URLs (Women’s sizes)
+for size in female_sizes:
+    product_lists_url.append(
+        f"/collections/new-balance?filter.v.option.size=US+W+{size}"
+    )
+
+# Gender‐filtered URLs
+product_lists_url.append("/collections/new-balance?filter.p.tag=All+Mens")
+product_lists_url.append("/collections/new-balance?filter.p.tag=All+Womens")
+
+
+# 2) Map each URL fragment to metadata (gender + age_group + “subTitle” marker)
+category_config: Dict[str, Dict] = {}
+for size in male_sizes:
+    key = f"/collections/new-balance?filter.v.option.size=US+M+{size}"
+    category_config[key] = {
+        "gender": ["male"],
+        "age_group": "adult",
+        "subTitle": f"size US M {size}"
+    }
+for size in female_sizes:
+    key = f"/collections/new-balance?filter.v.option.size=US+W+{size}"
+    category_config[key] = {
+        "gender": ["female"],
+        "age_group": "adult",
+        "subTitle": f"size US W {size}"
+    }
+
+category_config["/collections/new-balance?filter.p.tag=All+Mens"] = {
+    "gender": ["male"],
+    "age_group": "adult",
+    "subTitle": "All Mens"
+}
+category_config["/collections/new-balance?filter.p.tag=All+Womens"] = {
+    "gender": ["female"],
+    "age_group": "adult",
+    "subTitle": "All Womens"
+}
+
+BASE_PREFIX = "https://atmos.ph"
+
 
 @dataclass
 class NewBalanceShoe(BaseShoe):
-    sold: str = None
-    reviews: str = None
-    location: str = None
-    gender: List[str] = None
-    age_group: str = None
-    brand: str = None
+    # All BaseShoe fields come first (each already has a default).
+    # Now add `brand` *with* a default, to avoid the “non-default after default” error:
+    brand: str = "newbalance"
+
+    # Then the extra field `sizes` (also defaulted):
+    sizes: List[str] = None
+
 
 class NewBalanceExtractor(BaseExtractor):
-    def __init__(self, category: str = "all", num_pages: int = -1):
-        self.category = category
-        self.num_pages = num_pages
+    def __init__(self, category: str, num_pages: int = -1):
+        """
+        :param category: ignored (we loop through all product_lists_url)
+        :param num_pages: -1 → fetch until two consecutive empty pages; otherwise limit
+        """
+        self.max_pages = num_pages
 
-    def _fetch_page(self, page: int) -> str:
-        url = BASE_SEARCH_URL + (f"&page={page}" if page > 1 else "")
-        logger.info(f"Fetching: {url}")
-        with sync_playwright() as p:
-            browser = p.chromium.launch(headless=True)
-            page_obj = browser.new_page()
-            page_obj.goto(url, wait_until="domcontentloaded", timeout=60000)
-            time.sleep(6)
-            html = page_obj.content()
-            browser.close()
-        return html
+    def _build_url(self, fragment: str, page: int) -> str:
+        return f"{BASE_PREFIX}{fragment}&page={page}"
 
-    def _extract_image_url(self, prod) -> str:
-        images = prod.find_all("img")
-        for img in images:
-            src = img.get("src") or img.get("data-src")
-            if src and src.startswith("https://img.lazcdn.com/"):
-                return src.strip()
-        for img in images:
-            src = img.get("src") or img.get("data-src")
-            if src and not src.startswith("data:"):
-                return src.strip()
+    def _fetch_html(self, full_url: str) -> str:
+        logger.info(f"[Fetch] GET {full_url}")
+        resp = requests.get(full_url, timeout=30)
+        resp.raise_for_status()
+        return resp.text
+
+    @staticmethod
+    def _normalize_id(href: str) -> str:
+        parsed = urlparse(href)
+        slug = parsed.path.rstrip("/").split("/")[-1]
+        qs = parse_qs(parsed.query)
+        variant = qs.get("variant", [None])[0]
+        if variant:
+            return f"{slug}?variant={variant}"
+        return slug
+
+    @staticmethod
+    def _extract_image(prod_tag: BeautifulSoup) -> str:
+        img = prod_tag.select_one("img.ProductItem__Image")
+        if not img:
+            return ""
+        for attr in ("src", "data-src"):
+            raw = img.get(attr)
+            if raw and "{width}" in raw:
+                fixed = raw.replace("{width}", "400")
+                return fixed if fixed.startswith("http") else f"https:{fixed}"
+        srcset = img.get("srcset") or img.get("data-srcset") or ""
+        if srcset:
+            candidates = [p.strip() for p in srcset.split(",") if p.strip()]
+            for cand in candidates:
+                url_part = cand.split()[0]
+                if "_400x" in url_part:
+                    return url_part if url_part.startswith("http") else f"https:{url_part}"
+            first = candidates[0].split()[0]
+            return first if first.startswith("http") else f"https:{first}"
+        for attr in ("src", "data-src"):
+            raw = img.get(attr)
+            if raw:
+                return raw if raw.startswith("http") else f"https:{raw}"
         return ""
 
-    def _parse_products(self, html: str) -> List[dict]:
-        soup = BeautifulSoup(html, 'html.parser')
-        elems = soup.select("div.Bm3ON[data-qa-locator='product-item']")
-        prods = []
-        for prod in elems:
+    @staticmethod
+    def _fetch_sizes_from_detail(product_url: str) -> List[str]:
+        try:
+            resp = requests.get(product_url, timeout=30)
+            resp.raise_for_status()
+            detail_soup = BeautifulSoup(resp.text, "html.parser")
+            size_elems = detail_soup.find_all(
+                lambda tag: tag.name in ("button", "label")
+                and re.match(r"^US [MW] \d+(\.\d+)?$", tag.get_text(strip=True))
+            )
+            return sorted({elem.get_text(strip=True) for elem in size_elems})
+        except Exception:
+            return []
+
+    @classmethod
+    def _parse_page(
+        cls,
+        html: str,
+        metadata: Dict[str, List[str]]
+    ) -> List[dict]:
+        soup = BeautifulSoup(html, "html.parser")
+        cards = soup.select("div.ProductItem")
+        logger.info(f"[Parse] Found {len(cards)} ProductItem cards")
+
+        gender_list = metadata["gender"]
+        age_group_val = metadata["age_group"]
+        sub_title_marker = metadata["subTitle"]
+
+        results: List[dict] = []
+        for card in cards:
             try:
-                rec = {}
-                rec["id"] = prod.get("data-item-id")
-                a = prod.select_one("div.RfADt a")
-                if a:
-                    rec["title"] = a.get("title") or a.text.strip()
-                    href = a.get("href", "")
-                    rec["url"] = ("https:" + href) if href.startswith("//") else href
+                # 1) Title & URL
+                a_tag = card.select_one("h2.ProductItem__Title a")
+                href = a_tag.get("href", "") if a_tag else ""
+                product_url = f"{BASE_PREFIX}{href}" if href.startswith("/") else href
+                title = a_tag.text.strip() if a_tag else ""
+                norm_id = cls._normalize_id(href)
+
+                # 2) Prices
+                sale_el = card.select_one("span.Price--highlight")
+                price_sale = 0.0
+                if sale_el and sale_el.text.strip():
+                    price_sale = float(sale_el.text.strip().replace("₱", "").replace(",", ""))
+                orig_el = card.select_one("span.Price--compareAt")
+                price_original = price_sale
+                if orig_el and orig_el.text.strip():
+                    price_original = float(orig_el.text.strip().replace("₱", "").replace(",", ""))
+
+                # 3) Image
+                image_url = cls._extract_image(card)
+
+                # 4) Sizes
+                if sub_title_marker.startswith("size "):
+                    sizes_list = [sub_title_marker.replace("size ", "")]
                 else:
-                    rec["title"] = rec["url"] = ""
-                rec["subTitle"] = "running"
-                sale = prod.select_one("div.aBrP0 span.ooOxS")
-                rec["price_sale"] = sale.text if sale else None
-                orig = prod.select_one("div.WNoq3 span._1m41m del.ooOxS")
-                rec["price_original"] = orig.text if orig else rec["price_sale"]
-                sold = prod.select_one("div._6uN7R span._1cEkb span")
-                rec["sold"] = sold.text.strip() if sold else "N/A"
-                rev = prod.select_one("div._6uN7R div.mdmmT._32vUv span.qzqFw")
-                rec["reviews"] = rev.text.strip() if rev else "N/A"
-                loc = prod.select_one("div._6uN7R span.oa6ri")
-                rec["location"] = (loc.get("title") or loc.text.strip()) if loc else "N/A"
-                rec["image"] = self._extract_image_url(prod)
-                prods.append(rec)
-            except Exception as e:
-                logger.error(f"Error parsing product: {e}")
-        return prods
+                    sizes_list = cls._fetch_sizes_from_detail(product_url)
 
-    def _clean_data(self, df: pd.DataFrame) -> pd.DataFrame:
-        # convert price strings → floats
-        df["price_sale"] = df["price_sale"].astype(str).str.replace(r"[₱,]", "", regex=True).astype(float).fillna(0).clip(lower=0)
-        df["price_original"] = df["price_original"].astype(str).str.replace(r"[₱,]", "", regex=True).astype(float).fillna(0).clip(lower=0)
-        # add static attrs
-        df["gender"] = [['unisex'] for _ in range(len(df))]
-        df["age_group"] = "adult"
-        df["brand"] = "new balance"
-        # dedupe
-        return df.drop_duplicates(subset=["id"], keep="first")
+                # 5) Build a dict that matches exactly BaseShoe’s fields + brand + sizes
+                rec = {
+                    # ---- BaseShoe’s fields (in the same order BaseShoe declares) ----
+                    "id":             norm_id,
+                    "title":          title,
+                    "subTitle":       "",              # Atmos New Balance always leaves subTitle blank
+                    "url":            product_url,
+                    "image":          image_url,
+                    "price_sale":     price_sale,
+                    "price_original": price_original,
+                    "gender":         gender_list.copy(),
+                    "age_group":      age_group_val,
 
-    def _run_data_quality_tests(self, df: pd.DataFrame) -> bool:
-        ok = True
-        # required columns
-        req = ["id","title","url","price_sale","price_original","sold","reviews","location","gender","age_group","brand"]
-        missing = [c for c in req if c not in df.columns]
-        if missing:
-            logger.error(f"Missing columns: {missing}")
-            ok = False
-        # id not null
-        if df["id"].isnull().any():
-            logger.error("Null id values found")
-            ok = False
-        # no nulls
-        nulls = df.isnull().sum()[lambda x: x>0].to_dict()
-        if nulls:
-            logger.error(f"Nulls present: {nulls}")
-            ok = False
-        # price numeric
-        for col in ["price_sale","price_original"]:
-            if not pd.api.types.is_float_dtype(df[col]):
-                logger.error(f"{col} not float dtype")
-                ok = False
-        if ok:
-            logger.info("Data quality tests passed")
-        else:
-            logger.error("Data quality tests failed")
-        return ok
+                    # ---- Now `brand` (defaulted in dataclass) ----
+                    "brand":          "newbalance",
+
+                    # ---- Finally, the extra `sizes` field ----
+                    "sizes":         sizes_list
+                }
+                results.append(rec)
+            except Exception as exc:
+                logger.error(f"[Parse] Error parsing ProductItem: {exc}")
+        return results
 
     def extract(self) -> List[NewBalanceShoe]:
-        all_recs = []
-        page = 1
-        prev = 0
-        while True:
-            try:
-                html = self._fetch_page(page)
-            except Exception as e:
-                logger.error(f"Fetch error page {page}: {e}")
-                break
-            recs = self._parse_products(html)
-            if not recs or len(recs) == prev:
-                break
-            all_recs.extend(recs)
-            prev = len(recs)
-            page += 1
-            if self.num_pages != -1 and page > self.num_pages:
-                break
-            time.sleep(2)
+        logger.info("[Extract] Starting extraction for Atmos New Balance")
+        all_raw: List[dict] = []
 
-        df = pd.DataFrame(all_recs)
-        df_clean = self._clean_data(df)
-        self._run_data_quality_tests(df_clean)
+        for fragment in product_lists_url:
+            metadata = category_config.get(fragment, {})
+            page = 1
+            empty_count = 0
 
-        shoes = []
-        for rec in df_clean.to_dict(orient="records"):
-            shoes.append(NewBalanceShoe(**rec))
-        return shoes
+            while True:
+                if self.max_pages != -1 and page > self.max_pages:
+                    break
+
+                full_url = self._build_url(fragment, page)
+                try:
+                    html = self._fetch_html(full_url)
+                except Exception as exc:
+                    logger.error(f"[Fetch] {fragment} page {page} failed: {exc}")
+                    break
+
+                page_recs = self._parse_page(html, metadata)
+                if not page_recs:
+                    empty_count += 1
+                    if empty_count >= 2:
+                        break
+                else:
+                    empty_count = 0
+                    all_raw.extend(page_recs)
+
+                page += 1
+                time.sleep(1.5)
+
+        logger.info(f"[Extract] Raw items before merging: {len(all_raw)}")
+        if not all_raw:
+            return []
+
+        # 3) Merge duplicates by normalized 'id'
+        df = pd.DataFrame(all_raw)
+        merged: List[dict] = []
+        for item_id, group in df.groupby("id"):
+            base = group.iloc[0].to_dict()
+
+            # Combine all size lists
+            all_sizes = set()
+            for sz_list in group["sizes"]:
+                all_sizes.update(sz_list if isinstance(sz_list, list) else [sz_list])
+            base["sizes"] = sorted(all_sizes)
+
+            # Combine gender (if both ["male"] & ["female"], force ["unisex"])
+            all_genders = set()
+            for g_list in group["gender"]:
+                all_genders.update(g_list if isinstance(g_list, list) else [g_list])
+            base["gender"] = ["unisex"] if len(all_genders) > 1 else list(all_genders)
+
+            merged.append(base)
+
+        # Drop Prices that are 0
+        df = df[~((df["price_sale"] == 0.0) & (df["price_original"] == 0.0))].reset_index(drop=True)
+        logger.info(f"[Extract] Items after merging: {len(merged)}")
+        
+        df['image'] = df['image'].fillna("no_image.png")   
+
+        # Convert to NewBalanceShoe (BaseShoe fields first, then brand, then sizes)
+        return [
+            NewBalanceShoe(
+                id=rec["id"],
+                title=rec["title"],
+                subTitle=rec["subTitle"],
+                url=rec["url"],
+                image=rec["image"],
+                price_sale=rec["price_sale"],
+                price_original=rec["price_original"],
+                gender=rec["gender"],
+                age_group=rec["age_group"],
+                sizes=rec["sizes"],    # extra field
+            )
+            for rec in merged
+        ]

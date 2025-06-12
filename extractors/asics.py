@@ -54,7 +54,7 @@ PAGE_SIZE = 24
 
 @dataclass
 class AsicsShoe(BaseShoe):
-    pass
+    brand: str = "asics"
 
 
 class AsicsExtractor(BaseExtractor):
@@ -90,43 +90,78 @@ class AsicsExtractor(BaseExtractor):
         return None
 
     def _extract_products(self, html: str, path: str) -> List[AsicsShoe]:
-        soup = BeautifulSoup(html, 'html.parser')
+        soup  = BeautifulSoup(html, 'html.parser')
         tiles = soup.find_all('div', class_='product-tile')
         shoes = []
+
         for prod in tiles:
             try:
+                # 1) product ID
                 pid = prod.get("data-itemid")
-                title_elem = prod.find('div', class_='product-name')
-                title = title_elem.text.strip() if title_elem else None
+
+                # 2) title & subTitle
+                title_elem    = prod.find('div', class_='product-name')
                 subtitle_elem = prod.select_one(".product-tile__text--small")
+                title    = title_elem.text.strip()    if title_elem    else None
                 subtitle = subtitle_elem.text.strip() if subtitle_elem else None
+
+                # 3) URL (attach BASE_URL if needed)
                 link = prod.find_parent("a", class_="product-tile__link")
-                url = link["href"].strip() if link and link.has_attr("href") else None
-                url = f"{BASE_URL}{url}" if url and url.startswith("/") else url
-                sale_elem = prod.find('span', class_='price-sales')
-                orig_elem = prod.find('span', class_='price-original') or prod.find('span', class_='price-standard')
-                def parse(p):
-                    if p:
-                        n = re.sub(r'[^\d.]', '', p.text if hasattr(p, 'text') else str(p))
-                        return float(n) if n else None
-                    return None
-                ps = parse(sale_elem)
-                po = parse(orig_elem) or ps
+                url  = link["href"].strip() if link and link.has_attr("href") else None
+                if url and url.startswith("/"):
+                    url = f"{BASE_URL}{url}"
+
+                # 4) image URL (reuse your existing helper)
+                image = self._extract_image(prod)
+
+                # 5) sale vs. original price
+                #    - sale_elem: any span whose "class" list contains "price-sales"
+                #    - orig_elem: prefer "price-original" if present; otherwise anything with "price-standard"
+                sale_elem = prod.find(
+                    "span",
+                    class_=lambda attr: attr and "price-sales" in attr
+                )
+                orig_elem = (
+                    prod.find("span", class_=lambda attr: attr and "price-original" in attr)
+                    or
+                    prod.find("span", class_=lambda attr: attr and "price-standard" in attr)
+                )
+
+                def parse_price(tag):
+                    """
+                    Extract numeric portion from a <span> like "₱ 3,771.00" → 3771.00
+                    """
+                    if not tag:
+                        return None
+                    raw = tag.text if hasattr(tag, "text") else str(tag)
+                    # Remove currency symbols, commas, anything not digit or dot
+                    digits = re.sub(r"[^\d\.]", "", raw)
+                    return float(digits) if digits else None
+
+                ps = parse_price(sale_elem)       # sale price, if it exists
+                po = parse_price(orig_elem) or ps  # original price; fallback to ps if parsing fails
+
+                # 6) category config
                 cfg = CATEGORY_CONFIG.get(path, {})
+
+                # 7) build record
                 rec = {
-                    "id": pid,
-                    "title": title,
-                    "subTitle": subtitle,
-                    "url": url,
-                    "image": self._extract_image(prod),
-                    "price_sale": ps or 0.0,
-                    "price_original": po,
-                    "gender": cfg.get("gender", []),
-                    "age_group": cfg.get("age_group", "")
+                    "id":             pid,
+                    "title":          title,
+                    "subTitle":       subtitle,
+                    "url":            url,
+                    "image":          image,
+                    "price_sale":     ps if ps is not None else 0.0,
+                    "price_original": po if po is not None else 0.0,
+                    "gender":         cfg.get("gender", []),
+                    "age_group":      cfg.get("age_group", ""),
+                    "brand":          "asics"
                 }
                 shoes.append(AsicsShoe(**rec))
+
             except Exception as e:
-                logger.error(f"Error extracting tile: {e}")
+                logger.error(f"Error extracting tile (PID={pid}): {e}")
+
         return shoes
 
     def _process_category(self, path: str) -> List[AsicsShoe]:
@@ -154,6 +189,7 @@ class AsicsExtractor(BaseExtractor):
         df['gender'] = df['gender'].apply(lambda g: [x.lower() for x in g] if isinstance(g, list) else [])
         df = df.dropna(subset=['id'])
         df = df.drop_duplicates(subset=['id'], keep='first')
+        df['image'] = df['image'].fillna("no_image.png")   
         return df
 
     def _run_data_quality_tests(self, df: pd.DataFrame) -> bool:

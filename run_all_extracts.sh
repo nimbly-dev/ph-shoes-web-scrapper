@@ -7,7 +7,7 @@ PAGES="-1"
 UPLOAD="True"
 
 # List of supported brands
-BRANDS=("adidas" "nike" "worldbalance" "newbalance" "asics" "hoka")
+BRANDS=("adidas" "nike" "worldbalance" "newbalance_atmos" "asics" "hoka")
 
 # Loop through each brand and trigger extraction
 for BRAND in "${BRANDS[@]}"; do

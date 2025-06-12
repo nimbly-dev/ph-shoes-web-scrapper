@@ -1,3 +1,5 @@
+# hoka.py
+
 import time
 import re
 import requests
@@ -12,20 +14,34 @@ import pandas as pd
 from .base import BaseShoe, BaseExtractor
 from logger import get_logger
 
-# Create a logger for this module.
 logger = get_logger(__name__, log_file="./logs/hoka_poc.log")
+
 
 # Global configuration for Hoka
 base_url = "https://www.hoka.com/en/ph"
 product_lists_url = [
     # MEN
-    '/mens-road', '/mens-trail', '/mens-trail-hiking-shoes', '/mens-walking',
-    '/mens-fitness', '/mens-recovery-comfort-shoes', '/mens-stability-shoes',
-    '/mens-wides', '/mens-sandals', '/mens-lifestyle',
+    '/mens-road',
+    '/mens-trail',
+    '/mens-trail-hiking-shoes',
+    '/mens-walking',
+    '/mens-fitness',
+    '/mens-recovery-comfort-shoes',
+    '/mens-stability-shoes',
+    '/mens-wides',
+    '/mens-sandals',
+    '/mens-lifestyle',
     # WOMEN
-    '/womens-road', '/womens-trail', '/womens-trail-hiking-shoes', '/womens-walking',
-    '/womens-fitness', '/womens-recovery-comfort-shoes', '/womens-stability-shoes',
-    '/womens-wides', '/womens-sandals', '/womens-lifestyle',
+    '/womens-road',
+    '/womens-trail',
+    '/womens-trail-hiking-shoes',
+    '/womens-walking',
+    '/womens-fitness',
+    '/womens-recovery-comfort-shoes',
+    '/womens-stability-shoes',
+    '/womens-wides',
+    '/womens-sandals',
+    '/womens-lifestyle',
     # KIDS
     '/kids'
 ]
@@ -55,10 +71,11 @@ category_config = {
     '/kids': {"gender": ["unisex"], "age_group": "youth", "subTitle": "kids"}
 }
 
+
 @dataclass
 class HokaShoe(BaseShoe):
-    # extended to accept brand
-    brand: Optional[str] = None
+    brand: str = "hoka"
+
 
 def fetch_page(url: str) -> str:
     headers = {
@@ -71,6 +88,7 @@ def fetch_page(url: str) -> str:
     resp = requests.get(url, headers=headers)
     resp.raise_for_status()
     return resp.text
+
 
 def extract_image(prod) -> str:
     img = prod.find("img", class_="tile-image")
@@ -89,6 +107,7 @@ def extract_image(prod) -> str:
             pass
     return ""
 
+
 def parse_hoka_products(html: str) -> List[dict]:
     soup = BeautifulSoup(html, 'html.parser')
     elems = soup.find_all('div', class_='product', attrs={'data-pid': True})
@@ -104,15 +123,16 @@ def parse_hoka_products(html: str) -> List[dict]:
             rec["url"] = href if href.startswith("http") else "https://www.hoka.com" + href
         rec["image"] = extract_image(prod)
         sale = prod.find("span", class_="sales")
-        rec["price_sale"] = float(sale.get_text(strip=True).replace("₱","").replace(",","")) if sale else None
+        rec["price_sale"] = float(sale.get_text(strip=True).replace("₱", "").replace(",", "")) if sale else None
         orig = prod.find("span", class_="original-price")
         rec["price_original"] = (
-            float(orig.get_text(strip=True).replace("₱","").replace(",",""))
+            float(orig.get_text(strip=True).replace("₱", "").replace(",", ""))
             if orig else rec["price_sale"]
         )
         if rec.get("id") and rec.get("title"):
             out.append(rec)
     return out
+
 
 class HokaExtractor(BaseExtractor):
     def __init__(self, category: str = "all", num_pages: int = -1):
@@ -143,7 +163,7 @@ class HokaExtractor(BaseExtractor):
             prev = cnt
             sz += page_size
             time.sleep(0.5)
-            if self.num_pages != -1 and (sz/page_size) >= self.num_pages:
+            if self.num_pages != -1 and (sz / page_size) >= self.num_pages:
                 break
 
         # enrich with category_config
@@ -153,8 +173,6 @@ class HokaExtractor(BaseExtractor):
         return final
 
     def _clean_data(self, df: pd.DataFrame) -> pd.DataFrame:
-        # add brand for export but HokaShoe will accept it now
-        df["brand"] = "hoka"
         # null → None (except id)
         for c in df.columns:
             if c != "id":
@@ -164,14 +182,14 @@ class HokaExtractor(BaseExtractor):
         # title‐based gender normalization
         df["gender"] = df.apply(
             lambda r: ["unisex"]
-            if r.get("age_group")=="adult" and r.get("title") and "unisex" in r["title"].lower()
+            if r.get("age_group") == "adult" and r.get("title") and "unisex" in r["title"].lower()
             else r.get("gender"),
             axis=1
         )
         # dedupe
         df = df.drop_duplicates(subset=["id"], keep="first")
         # prices numeric
-        for col in ["price_sale","price_original"]:
+        for col in ["price_sale", "price_original"]:
             df[col] = pd.to_numeric(df[col], errors="coerce")
         # clean title text
         df["title"] = (
@@ -180,11 +198,13 @@ class HokaExtractor(BaseExtractor):
             .str.replace(r"\s+", " ", regex=True)
             .str.strip()
         )
+        
+        df['image'] = df['image'].fillna("no_image.png")   
         return df
 
     def _run_data_quality_tests(self, df: pd.DataFrame) -> bool:
         ok = True
-        req = ["id","title","subTitle","url","image","price_sale","price_original","gender","age_group","brand"]
+        req = ["id", "title", "subTitle", "url", "image", "price_sale", "price_original", "gender", "age_group", "brand"]
         miss = [c for c in req if c not in df.columns]
         if miss:
             logger.error(f"Missing columns: {miss}")
@@ -192,11 +212,11 @@ class HokaExtractor(BaseExtractor):
         if df["id"].isnull().any():
             logger.error("Null id values")
             ok = False
-        nulls = df.isnull().sum()[lambda x: x>0].to_dict()
+        nulls = df.isnull().sum()[lambda x: x > 0].to_dict()
         if nulls:
             logger.error(f"Nulls present: {nulls}")
             ok = False
-        for col in ["price_sale","price_original"]:
+        for col in ["price_sale", "price_original"]:
             if not pd.api.types.is_numeric_dtype(df[col]):
                 logger.error(f"{col} not numeric")
                 ok = False
@@ -208,7 +228,7 @@ class HokaExtractor(BaseExtractor):
 
     def extract(self) -> List[HokaShoe]:
         all_dicts = []
-        paths = product_lists_url if self.category.lower()=="all" else [self.category]
+        paths = product_lists_url if self.category.lower() == "all" else [self.category]
         for p in paths:
             logger.info(f"Processing category {p}")
             all_dicts.extend(self._scrape_category(p))

@@ -41,20 +41,35 @@ class CSVUtil:
 
     @staticmethod
     def upload_to_s3(results, file_name: str):
-        # Create CSV content in memory
+        """
+        Serializes a list of dataclass instances or dicts to CSV in memory,
+        uploads it to S3, and returns the S3 key.
+        """
+        # Build CSV in memory
         output = io.StringIO()
         writer = csv.writer(output)
-        writer.writerow(results[0].__dict__.keys())
-        for shoe in results:
-            writer.writerow(shoe.__dict__.values())
+
+        # Determine header & rows for dicts vs. objects
+        first = results[0]
+        if isinstance(first, dict):
+            headers = list(first.keys())
+            writer.writerow(headers)
+            for row in results:
+                writer.writerow([row.get(col) for col in headers])
+        else:
+            headers = list(first.__dict__.keys())
+            writer.writerow(headers)
+            for obj in results:
+                writer.writerow(obj.__dict__.values())
+
         csv_content = output.getvalue()
         output.close()
 
-        # Format S3 key as /raw/{year}/{month}/{day}/{file_name}
+        # Construct S3 key based on current UTC date
         now = datetime.utcnow()
         s3_key = f"raw/{now.year}/{now.month:02d}/{now.day:02d}/{file_name}"
 
-        # Initialize S3 client using environment variables
+        # Initialize S3 client from environment variables
         s3_client = boto3.client(
             "s3",
             aws_access_key_id=os.getenv("AWS_S3_DATA_LAKE_UPLOADER_ACCESS_KEY_ID"),
@@ -62,8 +77,8 @@ class CSVUtil:
             region_name=os.getenv("AWS_REGION"),
         )
         s3_bucket = os.getenv("S3_BUCKET")
-        
-        # S3 doesn't require explicit folder creation. Uploading to the key automatically creates the prefix.
+
+        # Upload CSV to S3
         s3_client.put_object(Bucket=s3_bucket, Key=s3_key, Body=csv_content)
-        
+
         return s3_key
