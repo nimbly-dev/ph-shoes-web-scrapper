@@ -142,7 +142,7 @@ class NikeExtractor(BaseExtractor):
 
         
         # 1) Filter out any row where title OR subTitle contains "sportswear" or "tshirt"
-        pattern = r"(sportswear|tshirt)"
+        pattern = r"(sportswear|tshirt|drifit|t-shirt|cap|shorts|short|jacket|hoodie)"
         mask_title    = ~df["title"].str.contains(pattern, case=False, na=False)
         mask_subtitle = ~df["subTitle"].str.contains(pattern, case=False, na=False)
         df = df[mask_title & mask_subtitle]
