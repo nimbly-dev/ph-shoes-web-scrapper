@@ -103,9 +103,27 @@ def extract_image(prod) -> str:
                     url = grp["default"]["medium"][0].get("url")
                     if url:
                         return url.strip()
-        except:
+        except Exception:
             pass
     return ""
+
+
+def _parse_price(tag) -> Optional[float]:
+    """
+    Safely parse a BeautifulSoup tag containing a price string
+    (like <span class="sales">₱ 7,996.00</span>), returning a float
+    or None if empty/malformed.
+    """
+    if not tag:
+        return None
+    text = tag.get_text(strip=True).replace("₱", "").replace(",", "")
+    if not text:
+        return None
+    try:
+        return float(text)
+    except ValueError:
+        logger.warning(f"Could not parse price from text: '{text}'")
+        return None
 
 
 def parse_hoka_products(html: str) -> List[dict]:
@@ -114,23 +132,39 @@ def parse_hoka_products(html: str) -> List[dict]:
     out = []
     for prod in elems:
         rec = {}
+
+        # always set brand so DataFrame has that column
+        rec["brand"] = "hoka"
         rec["id"] = prod.get("data-pid")
+
+        # title
         nm = prod.find("div", class_="tile-product-name")
         if nm and (a := nm.find("a", class_="link")):
             rec["title"] = a.get_text(strip=True)
+
+        # url
         if (ln := prod.find("a", class_="js-pdp-link")) and ln.has_attr("href"):
             href = ln["href"].strip()
             rec["url"] = href if href.startswith("http") else "https://www.hoka.com" + href
+
+        # image
         rec["image"] = extract_image(prod)
-        sale = prod.find("span", class_="sales")
-        rec["price_sale"] = float(sale.get_text(strip=True).replace("₱", "").replace(",", "")) if sale else None
-        orig = prod.find("span", class_="original-price")
-        rec["price_original"] = (
-            float(orig.get_text(strip=True).replace("₱", "").replace(",", ""))
-            if orig else rec["price_sale"]
-        )
+
+        # prices
+        sale_tag = prod.find("span", class_="sales")
+        rec["price_sale"] = _parse_price(sale_tag)
+
+        orig_tag = prod.find("span", class_="original-price")
+        orig_price = _parse_price(orig_tag)
+        rec["price_original"] = orig_price if orig_price is not None else rec["price_sale"]
+
+        # skip items with absolutely no price
+        if rec["price_sale"] is None and rec["price_original"] is None:
+            continue
+
         if rec.get("id") and rec.get("title"):
             out.append(rec)
+
     return out
 
 
@@ -198,8 +232,8 @@ class HokaExtractor(BaseExtractor):
             .str.replace(r"\s+", " ", regex=True)
             .str.strip()
         )
-        
-        df['image'] = df['image'].fillna("no_image.png")   
+
+        df['image'] = df['image'].fillna("no_image.png")
         return df
 
     def _run_data_quality_tests(self, df: pd.DataFrame) -> bool:
@@ -238,6 +272,5 @@ class HokaExtractor(BaseExtractor):
         df_clean = self._clean_data(df)
         self._run_data_quality_tests(df_clean)
 
-        # now we can safely instantiate HokaShoe with brand present
         shoes = [HokaShoe(**rec) for rec in df_clean.to_dict(orient="records")]
         return shoes

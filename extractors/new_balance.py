@@ -176,16 +176,32 @@ class NewBalanceExtractor(BaseExtractor):
                 title = a_tag.text.strip() if a_tag else ""
                 norm_id = cls._normalize_id(href)
 
-                # 2) Prices
-                sale_el = card.select_one("span.Price--highlight")
-                price_sale = 0.0
-                if sale_el and sale_el.text.strip():
-                    price_sale = float(sale_el.text.strip().replace("₱", "").replace(",", ""))
+                # ── 2) Prices ───────────────────────────────────────
+                # Compare-at price (the “original” price when on sale)
                 orig_el = card.select_one("span.Price--compareAt")
-                price_original = price_sale
-                if orig_el and orig_el.text.strip():
-                    price_original = float(orig_el.text.strip().replace("₱", "").replace(",", ""))
+                # Highlighted price (the “sale” price)
+                sale_el = card.select_one("span.Price--highlight")
+                # Fallback single price for non-sale items
+                default_el = card.select_one("span.ProductItem__Price.Text--subdued")
 
+                if orig_el and sale_el:
+                    # standard on-sale item
+                    price_original = float(
+                        orig_el.text.strip().replace("₱", "").replace(",", "")
+                    )
+                    price_sale     = float(
+                        sale_el.text.strip().replace("₱", "").replace(",", "")
+                    )
+                elif default_el:
+                    # not on sale → use the single price as both original & sale
+                    p = float(default_el.text.strip().replace("₱", "").replace(",", ""))
+                    price_original = p
+                    price_sale     = p
+                else:
+                    # no parsable price → skip this card
+                    continue
+                
+                
                 # 3) Image
                 image_url = cls._extract_image(card)
 
