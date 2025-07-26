@@ -2,8 +2,9 @@
 
 import re
 import time
+import json
 from dataclasses import dataclass
-from typing import List, Dict
+from typing import List, Dict, Any
 from urllib.parse import urlparse, parse_qs
 
 import pandas as pd
@@ -15,38 +16,27 @@ from logger import get_logger
 
 logger = get_logger(__name__, log_file="./logs/new_balance_poc.log")
 
+
 # 1) Build the list of filtered endpoints for Atmos New Balance
-male_sizes = [
-    "4", "4.5", "5", "5.5", "6", "6.5", "7", "7.5",
-    "8", "8.5", "9", "9.5", "10", "10.5", "11",
-    "11.5", "12", "12.5", "13"
-]
-female_sizes = [
-    "5", "5.5", "6", "6.5", "7", "7.5",
-    "8", "8.5", "9", "9.5", "10"
-]
+male_sizes = [ "4", "4.5", "5", "5.5", "6", "6.5", "7", "7.5",
+               "8", "8.5", "9", "9.5", "10", "10.5", "11",
+               "11.5", "12", "12.5", "13" ]
+female_sizes = [ "5", "5.5", "6", "6.5", "7", "7.5",
+                 "8", "8.5", "9", "9.5", "10" ]
 
 product_lists_url: List[str] = []
-
-# Size‐filtered URLs (Men’s sizes)
 for size in male_sizes:
-    product_lists_url.append(
-        f"/collections/new-balance?filter.v.option.size=US+M+{size}"
-    )
-
-# Size‐filtered URLs (Women’s sizes)
+    product_lists_url.append(f"/collections/new-balance?filter.v.option.size=US+M+{size}")
 for size in female_sizes:
-    product_lists_url.append(
-        f"/collections/new-balance?filter.v.option.size=US+W+{size}"
-    )
+    product_lists_url.append(f"/collections/new-balance?filter.v.option.size=US+W+{size}")
 
 # Gender‐filtered URLs
 product_lists_url.append("/collections/new-balance?filter.p.tag=All+Mens")
 product_lists_url.append("/collections/new-balance?filter.p.tag=All+Womens")
 
 
-# 2) Map each URL fragment to metadata (gender + age_group + “subTitle” marker)
-category_config: Dict[str, Dict] = {}
+# 2) Map each URL fragment to metadata (gender, age_group, subTitle)
+category_config: Dict[str, Dict[str, Any]] = {}
 for size in male_sizes:
     key = f"/collections/new-balance?filter.v.option.size=US+M+{size}"
     category_config[key] = {
@@ -61,37 +51,34 @@ for size in female_sizes:
         "age_group": "adult",
         "subTitle": f"size US W {size}"
     }
-
 category_config["/collections/new-balance?filter.p.tag=All+Mens"] = {
-    "gender": ["male"],
-    "age_group": "adult",
-    "subTitle": "All Mens"
+    "gender": ["male"],   "age_group": "adult", "subTitle": "All Mens"
 }
 category_config["/collections/new-balance?filter.p.tag=All+Womens"] = {
-    "gender": ["female"],
-    "age_group": "adult",
-    "subTitle": "All Womens"
+    "gender": ["female"], "age_group": "adult", "subTitle": "All Womens"
 }
+
 
 BASE_PREFIX = "https://atmos.ph"
 
 
 @dataclass
 class NewBalanceShoe(BaseShoe):
-    # All BaseShoe fields come first (each already has a default).
-    # Now add `brand` *with* a default, to avoid the “non-default after default” error:
+    """
+    Subclass of BaseShoe for New Balance; `extra` will hold sizes.
+    """
     brand: str = "newbalance"
-
-    # Then the extra field `sizes` (also defaulted):
-    sizes: List[str] = None
+    # no separate sizes field—use BaseShoe.extra
 
 
 class NewBalanceExtractor(BaseExtractor):
-    def __init__(self, category: str, num_pages: int = -1):
-        """
-        :param category: ignored (we loop through all product_lists_url)
-        :param num_pages: -1 → fetch until two consecutive empty pages; otherwise limit
-        """
+    """
+    Extractor for Atmos New Balance.  
+    Loops through the filtered product_list fragments, scrapes pages,
+    normalizes into BaseShoe shape, and bundles sizes into `extra`.
+    """
+
+    def __init__(self, category: str = "all", num_pages: int = -1):
         self.max_pages = num_pages
 
     def _build_url(self, fragment: str, page: int) -> str:
@@ -109,9 +96,7 @@ class NewBalanceExtractor(BaseExtractor):
         slug = parsed.path.rstrip("/").split("/")[-1]
         qs = parse_qs(parsed.query)
         variant = qs.get("variant", [None])[0]
-        if variant:
-            return f"{slug}?variant={variant}"
-        return slug
+        return f"{slug}?variant={variant}" if variant else slug
 
     @staticmethod
     def _extract_image(prod_tag: BeautifulSoup) -> str:
@@ -123,19 +108,12 @@ class NewBalanceExtractor(BaseExtractor):
             if raw and "{width}" in raw:
                 fixed = raw.replace("{width}", "400")
                 return fixed if fixed.startswith("http") else f"https:{fixed}"
+        # fallback to srcset
         srcset = img.get("srcset") or img.get("data-srcset") or ""
-        if srcset:
-            candidates = [p.strip() for p in srcset.split(",") if p.strip()]
-            for cand in candidates:
-                url_part = cand.split()[0]
-                if "_400x" in url_part:
-                    return url_part if url_part.startswith("http") else f"https:{url_part}"
-            first = candidates[0].split()[0]
-            return first if first.startswith("http") else f"https:{first}"
-        for attr in ("src", "data-src"):
-            raw = img.get(attr)
-            if raw:
-                return raw if raw.startswith("http") else f"https:{raw}"
+        for part in srcset.split(","):
+            url_part = part.strip().split()[0]
+            if "_400x" in url_part:
+                return url_part if url_part.startswith("http") else f"https:{url_part}"
         return ""
 
     @staticmethod
@@ -155,161 +133,171 @@ class NewBalanceExtractor(BaseExtractor):
     @classmethod
     def _parse_page(
         cls,
-        html: str,
-        metadata: Dict[str, List[str]]
+        html_str: str,
+        metadata: Dict[str, Any]
     ) -> List[dict]:
-        soup = BeautifulSoup(html, "html.parser")
+        soup = BeautifulSoup(html_str, "html.parser")
         cards = soup.select("div.ProductItem")
         logger.info(f"[Parse] Found {len(cards)} ProductItem cards")
 
-        gender_list = metadata["gender"]
-        age_group_val = metadata["age_group"]
-        sub_title_marker = metadata["subTitle"]
+        gender_list    = metadata["gender"]
+        age_group_val  = metadata["age_group"]
+        sub_title_mark = metadata["subTitle"]
 
         results: List[dict] = []
         for card in cards:
             try:
                 # 1) Title & URL
                 a_tag = card.select_one("h2.ProductItem__Title a")
-                href = a_tag.get("href", "") if a_tag else ""
-                product_url = f"{BASE_PREFIX}{href}" if href.startswith("/") else href
-                title = a_tag.text.strip() if a_tag else ""
+                href = a_tag["href"] if a_tag and a_tag.has_attr("href") else ""
+                product_url = (f"{BASE_PREFIX}{href}"
+                               if href.startswith("/") else href)
+                title = a_tag.get_text(strip=True) if a_tag else ""
                 norm_id = cls._normalize_id(href)
 
-                # ── 2) Prices ───────────────────────────────────────
-                # Compare-at price (the “original” price when on sale)
-                orig_el = card.select_one("span.Price--compareAt")
-                # Highlighted price (the “sale” price)
-                sale_el = card.select_one("span.Price--highlight")
-                # Fallback single price for non-sale items
-                default_el = card.select_one("span.ProductItem__Price.Text--subdued")
+                # 2) Prices
+                orig_el   = card.select_one("span.Price--compareAt")
+                sale_el   = card.select_one("span.Price--highlight")
+                default_el= card.select_one("span.ProductItem__Price.Text--subdued")
 
                 if orig_el and sale_el:
-                    # standard on-sale item
-                    price_original = float(
-                        orig_el.text.strip().replace("₱", "").replace(",", "")
-                    )
-                    price_sale     = float(
-                        sale_el.text.strip().replace("₱", "").replace(",", "")
-                    )
+                    po = float(orig_el.text.strip().replace("₱","").replace(",",""))
+                    ps = float(sale_el.text.strip().replace("₱","").replace(",",""))
                 elif default_el:
-                    # not on sale → use the single price as both original & sale
-                    p = float(default_el.text.strip().replace("₱", "").replace(",", ""))
-                    price_original = p
-                    price_sale     = p
+                    p = float(default_el.text.strip().replace("₱","").replace(",",""))
+                    po = ps = p
                 else:
-                    # no parsable price → skip this card
                     continue
-                
-                
+
                 # 3) Image
                 image_url = cls._extract_image(card)
 
                 # 4) Sizes
-                if sub_title_marker.startswith("size "):
-                    sizes_list = [sub_title_marker.replace("size ", "")]
+                if sub_title_mark.startswith("size "):
+                    sizes_list = [ sub_title_mark.replace("size ", "") ]
                 else:
                     sizes_list = cls._fetch_sizes_from_detail(product_url)
 
-                # 5) Build a dict that matches exactly BaseShoe’s fields + brand + sizes
+                # 5) Build canonical record
                 rec = {
-                    # ---- BaseShoe’s fields (in the same order BaseShoe declares) ----
                     "id":             norm_id,
                     "title":          title,
-                    "subTitle":       "",              # Atmos New Balance always leaves subTitle blank
+                    "subTitle":       sub_title_mark,
                     "url":            product_url,
                     "image":          image_url,
-                    "price_sale":     price_sale,
-                    "price_original": price_original,
-                    "gender":         gender_list.copy(),
+                    "price_sale":     ps,
+                    "price_original": po,
+                    "gender":         gender_list,
                     "age_group":      age_group_val,
-
-                    # ---- Now `brand` (defaulted in dataclass) ----
                     "brand":          "newbalance",
-
-                    # ---- Finally, the extra `sizes` field ----
-                    "sizes":         sizes_list
                 }
+                # bundle sizes into `extra`
+                extras = {"sizes": sizes_list}
+                rec["extra"] = json.dumps(extras, ensure_ascii=False) if extras else None
+
                 results.append(rec)
             except Exception as exc:
                 logger.error(f"[Parse] Error parsing ProductItem: {exc}")
         return results
 
+    def _run_data_quality_tests(self, df: pd.DataFrame) -> bool:
+        """
+        Sanity checks: required columns, numeric prices, unique IDs.
+        """
+        ok = True
+        required = [
+            "id","title","subTitle","url","image",
+            "price_sale","price_original",
+            "gender","age_group","brand","extra"
+        ]
+        missing = [c for c in required if c not in df.columns]
+        if missing:
+            logger.error(f"[DQ Fail] Missing columns: {missing}")
+            ok = False
+
+        for col in ["price_sale","price_original"]:
+            if df[col].isnull().any():
+                logger.error(f"[DQ Fail] {col} has nulls")
+                ok = False
+            if not pd.api.types.is_numeric_dtype(df[col]):
+                logger.error(f"[DQ Fail] {col} is not numeric")
+                ok = False
+
+        if not df["id"].is_unique:
+            dupes = df[df.duplicated("id", keep=False)]["id"].unique().tolist()
+            logger.error(f"[DQ Fail] Duplicate id(s): {dupes}")
+            ok = False
+
+        if ok:
+            logger.info("[DQ] Data quality tests passed")
+        else:
+            logger.error("[DQ] Data quality tests **failed**")
+        return ok
+
     def extract(self) -> List[NewBalanceShoe]:
-        logger.info("[Extract] Starting extraction for Atmos New Balance")
+        """
+        Entry point: fetch all fragments, parse pages until empty,
+        merge duplicates, run DQ, and return dataclasses.
+        """
         all_raw: List[dict] = []
 
         for fragment in product_lists_url:
             metadata = category_config.get(fragment, {})
             page = 1
-            empty_count = 0
+            empty_runs = 0
 
             while True:
                 if self.max_pages != -1 and page > self.max_pages:
                     break
-
-                full_url = self._build_url(fragment, page)
+                url = self._build_url(fragment, page)
                 try:
-                    html = self._fetch_html(full_url)
-                except Exception as exc:
-                    logger.error(f"[Fetch] {fragment} page {page} failed: {exc}")
+                    html_str = self._fetch_html(url)
+                except Exception as e:
+                    logger.error(f"[Fetch] {fragment} page {page} failed: {e}")
                     break
 
-                page_recs = self._parse_page(html, metadata)
-                if not page_recs:
-                    empty_count += 1
-                    if empty_count >= 2:
+                page_items = self._parse_page(html_str, metadata)
+                if not page_items:
+                    empty_runs += 1
+                    if empty_runs >= 2:
                         break
                 else:
-                    empty_count = 0
-                    all_raw.extend(page_recs)
+                    empty_runs = 0
+                    all_raw.extend(page_items)
 
                 page += 1
                 time.sleep(1.5)
 
-        logger.info(f"[Extract] Raw items before merging: {len(all_raw)}")
+        #  Early exit if nothing found
         if not all_raw:
             return []
 
-        # 3) Merge duplicates by normalized 'id'
+        # Merge duplicates by `id`
         df = pd.DataFrame(all_raw)
         merged: List[dict] = []
         for item_id, group in df.groupby("id"):
             base = group.iloc[0].to_dict()
 
-            # Combine all size lists
+            # merge sizes
             all_sizes = set()
-            for sz_list in group["sizes"]:
-                all_sizes.update(sz_list if isinstance(sz_list, list) else [sz_list])
-            base["sizes"] = sorted(all_sizes)
+            for blob in group["extra"].dropna():
+                all_sizes.update(json.loads(blob)["sizes"])
+            base["extra"] = json.dumps({"sizes": sorted(all_sizes)}, ensure_ascii=False)
 
-            # Combine gender (if both ["male"] & ["female"], force ["unisex"])
-            all_genders = set()
-            for g_list in group["gender"]:
-                all_genders.update(g_list if isinstance(g_list, list) else [g_list])
-            base["gender"] = ["unisex"] if len(all_genders) > 1 else list(all_genders)
+            # normalize gender
+            genders = set(sum(group["gender"].tolist(), []))
+            base["gender"] = ["unisex"] if genders == {"male","female"} else sorted(genders)
 
             merged.append(base)
 
-        # Drop Prices that are 0
-        df = df[~((df["price_sale"] == 0.0) & (df["price_original"] == 0.0))].reset_index(drop=True)
-        logger.info(f"[Extract] Items after merging: {len(merged)}")
-        
-        df['image'] = df['image'].fillna("no_image.png")   
+        # clean numeric & image
+        df_clean = pd.DataFrame(merged)
+        df_clean["image"] = df_clean["image"].fillna("")
+        for col in ["price_sale","price_original"]:
+            df_clean[col] = pd.to_numeric(df_clean[col], errors="coerce").fillna(0).clip(lower=0)
 
-        # Convert to NewBalanceShoe (BaseShoe fields first, then brand, then sizes)
-        return [
-            NewBalanceShoe(
-                id=rec["id"],
-                title=rec["title"],
-                subTitle=rec["subTitle"],
-                url=rec["url"],
-                image=rec["image"],
-                price_sale=rec["price_sale"],
-                price_original=rec["price_original"],
-                gender=rec["gender"],
-                age_group=rec["age_group"],
-                sizes=rec["sizes"],    # extra field
-            )
-            for rec in merged
-        ]
+        # run your data quality checks
+        self._run_data_quality_tests(df_clean)
+
+        # return dataclasses
+        return [NewBalanceShoe(**rec) for rec in df_clean.to_dict("records")]

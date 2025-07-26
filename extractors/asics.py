@@ -1,3 +1,5 @@
+# asics.py
+
 import time
 import re
 import requests
@@ -6,9 +8,8 @@ import html
 import json
 import pandas as pd
 from bs4 import BeautifulSoup
-from typing import List
+from typing import List, Optional, Dict, Any
 from dataclasses import dataclass
-from typing import Optional
 
 from .base import BaseShoe, BaseExtractor
 from logger import get_logger
@@ -54,10 +55,20 @@ PAGE_SIZE = 24
 
 @dataclass
 class AsicsShoe(BaseShoe):
+    """
+    Subclass of BaseShoe with brand preset to 'asics'
+    and an optional JSON-encoded extra blob.
+    """
     brand: str = "asics"
+    extra: Optional[str] = None
 
 
 class AsicsExtractor(BaseExtractor):
+    """
+    Extractor for ASICS shoes, returns a list of AsicsShoe instances.
+    Bundles any site-specific metadata into the JSON `extra` field.
+    """
+
     def __init__(self, category: str = "all", num_pages: int = -1):
         self.category = category
         self.num_pages = num_pages
@@ -74,49 +85,49 @@ class AsicsExtractor(BaseExtractor):
             src = img.get("data-src-load-more") or img.get("src")
             if src and not src.startswith("data:"):
                 return src.strip()
-        # fallback via data-alt-image
         if img and img.has_attr("data-alt-image"):
             try:
                 alt = json.loads(html.unescape(img["data-alt-image"]))
                 return alt.get("src", "").strip()
             except Exception:
                 pass
-        # final fallback template
         pid = prod.get("data-itemid")
         if pid:
             parts = pid.split("-")
             if len(parts) == 2:
-                return f"https://images.asics.com/is/image/asics/{parts[0]}_{parts[1]}_SR_RT_AJP?$productlist$"
+                return (
+                    f"https://images.asics.com/is/image/asics/"
+                    f"{parts[0]}_{parts[1]}_SR_RT_AJP?$productlist$"
+                )
         return None
 
-    def _extract_products(self, html: str, path: str) -> List[AsicsShoe]:
-        soup  = BeautifulSoup(html, 'html.parser')
+    def _extract_products(self, html_str: str, path: str) -> List[AsicsShoe]:
+        soup  = BeautifulSoup(html_str, 'html.parser')
         tiles = soup.find_all('div', class_='product-tile')
         shoes = []
 
         for prod in tiles:
             try:
-                # 1) product ID
                 pid = prod.get("data-itemid")
-
-                # 2) title & subTitle
                 title_elem    = prod.find('div', class_='product-name')
                 subtitle_elem = prod.select_one(".product-tile__text--small")
                 title    = title_elem.text.strip()    if title_elem    else None
                 subtitle = subtitle_elem.text.strip() if subtitle_elem else None
 
-                # 3) URL (attach BASE_URL if needed)
                 link = prod.find_parent("a", class_="product-tile__link")
                 url  = link["href"].strip() if link and link.has_attr("href") else None
                 if url and url.startswith("/"):
                     url = f"{BASE_URL}{url}"
 
-                # 4) image URL (reuse your existing helper)
                 image = self._extract_image(prod)
 
-                # 5) sale vs. original price
-                #    - sale_elem: any span whose "class" list contains "price-sales"
-                #    - orig_elem: prefer "price-original" if present; otherwise anything with "price-standard"
+                def parse_price(tag):
+                    if not tag:
+                        return None
+                    raw = tag.text if hasattr(tag, "text") else str(tag)
+                    digits = re.sub(r"[^\d\.]", "", raw)
+                    return float(digits) if digits else None
+
                 sale_elem = prod.find(
                     "span",
                     class_=lambda attr: attr and "price-sales" in attr
@@ -126,26 +137,13 @@ class AsicsExtractor(BaseExtractor):
                     or
                     prod.find("span", class_=lambda attr: attr and "price-standard" in attr)
                 )
+                ps = parse_price(sale_elem)
+                po = parse_price(orig_elem) or ps
 
-                def parse_price(tag):
-                    """
-                    Extract numeric portion from a <span> like "₱ 3,771.00" → 3771.00
-                    """
-                    if not tag:
-                        return None
-                    raw = tag.text if hasattr(tag, "text") else str(tag)
-                    # Remove currency symbols, commas, anything not digit or dot
-                    digits = re.sub(r"[^\d\.]", "", raw)
-                    return float(digits) if digits else None
-
-                ps = parse_price(sale_elem)       # sale price, if it exists
-                po = parse_price(orig_elem) or ps  # original price; fallback to ps if parsing fails
-
-                # 6) category config
                 cfg = CATEGORY_CONFIG.get(path, {})
 
-                # 7) build record
-                rec = {
+                # build the canonical record
+                rec: Dict[str, Any] = {
                     "id":             pid,
                     "title":          title,
                     "subTitle":       subtitle,
@@ -155,8 +153,15 @@ class AsicsExtractor(BaseExtractor):
                     "price_original": po if po is not None else 0.0,
                     "gender":         cfg.get("gender", []),
                     "age_group":      cfg.get("age_group", ""),
-                    "brand":          "asics"
+                    "brand":          "asics",
                 }
+
+                # site-specific extras: include category path
+                extras = {"category": path}
+                # prune empties
+                extras = {k: v for k, v in extras.items() if v}
+                rec["extra"] = json.dumps(extras, ensure_ascii=False) if extras else None
+
                 shoes.append(AsicsShoe(**rec))
 
             except Exception as e:
@@ -166,45 +171,43 @@ class AsicsExtractor(BaseExtractor):
 
     def _process_category(self, path: str) -> List[AsicsShoe]:
         url_base = f"{BASE_URL}{path}/"
-        all_shoes = []
+        all_shoes: List[AsicsShoe] = []
         start = 0
+
         while True:
             url = f"{url_base}?start={start}&sz={PAGE_SIZE}"
             logger.info(f"Fetching {url}")
-            html = self._fetch_page(url)
-            shoes = self._extract_products(html, path)
-            logger.info(f"Found {len(shoes)} on start={start}")
-            if not shoes:
+            html_str = self._fetch_page(url)
+            batch = self._extract_products(html_str, path)
+            logger.info(f"Found {len(batch)} on start={start}")
+            if not batch:
                 break
-            all_shoes.extend(shoes)
+            all_shoes.extend(batch)
             start += PAGE_SIZE
             if self.num_pages != -1 and start >= PAGE_SIZE * self.num_pages:
                 break
             time.sleep(0.25)
+
         return all_shoes
 
     def _clean_data(self, df: pd.DataFrame) -> pd.DataFrame:
-        df['price_sale'] = pd.to_numeric(df['price_sale'], errors='coerce').fillna(0).clip(lower=0)
+        df['price_sale']     = pd.to_numeric(df['price_sale'], errors='coerce').fillna(0).clip(lower=0)
         df['price_original'] = pd.to_numeric(df['price_original'], errors='coerce').fillna(0).clip(lower=0)
         df['gender'] = df['gender'].apply(lambda g: [x.lower() for x in g] if isinstance(g, list) else [])
-        df = df.dropna(subset=['id'])
-        df = df.drop_duplicates(subset=['id'], keep='first')
-        df['image'] = df['image'].fillna("no_image.png")   
-        return df
+        df = df.dropna(subset=['id']).drop_duplicates(subset=['id'], keep='first')
+        df['image'] = df['image'].fillna("")
+        return df.reset_index(drop=True)
 
     def _run_data_quality_tests(self, df: pd.DataFrame) -> bool:
         ok = True
-        # no nulls
         nulls = df.isnull().sum()[lambda x: x>0].to_dict()
         if nulls:
             logger.error(f"Nulls found: {nulls}")
             ok = False
-        # prices numeric
         for col in ['price_sale','price_original']:
             if not pd.api.types.is_numeric_dtype(df[col]):
                 logger.error(f"{col} not numeric")
                 ok = False
-        # unique id
         if not df['id'].is_unique:
             logger.error("Duplicate ids found")
             ok = False
@@ -217,6 +220,7 @@ class AsicsExtractor(BaseExtractor):
     def extract(self) -> List[AsicsShoe]:
         paths = PRODUCT_LISTS if self.category.lower() == "all" else [self.category]
         all_shoes: List[AsicsShoe] = []
+
         with concurrent.futures.ThreadPoolExecutor(max_workers=3) as ex:
             futures = {ex.submit(self._process_category, p): p for p in paths}
             for f in concurrent.futures.as_completed(futures):
@@ -231,4 +235,4 @@ class AsicsExtractor(BaseExtractor):
         df = pd.DataFrame([s.__dict__ for s in all_shoes])
         df_clean = self._clean_data(df)
         self._run_data_quality_tests(df_clean)
-        return [AsicsShoe(**rec) for rec in df_clean.to_dict('records')]
+        return [AsicsShoe(**rec) for rec in df_clean.to_dict("records")]

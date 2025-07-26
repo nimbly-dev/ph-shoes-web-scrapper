@@ -43,8 +43,12 @@ class CSVUtil:
     def upload_to_s3(results, file_name: str):
         """
         Serializes a list of dataclass instances or dicts to CSV in memory,
-        uploads it to S3, and returns the S3 key.
+        replaces any empty-string values with "empty", uploads to S3, and returns the S3 key.
         """
+        def sanitize(val):
+            # if val is exactly the empty string, replace it; otherwise leave it alone
+            return "empty" if val == "" else val
+
         # Build CSV in memory
         output = io.StringIO()
         writer = csv.writer(output)
@@ -55,12 +59,15 @@ class CSVUtil:
             headers = list(first.keys())
             writer.writerow(headers)
             for row in results:
-                writer.writerow([row.get(col) for col in headers])
+                # get raw values, sanitize each, then write
+                row_vals = [sanitize(row.get(col, "")) for col in headers]
+                writer.writerow(row_vals)
         else:
             headers = list(first.__dict__.keys())
             writer.writerow(headers)
             for obj in results:
-                writer.writerow(obj.__dict__.values())
+                raw_vals = [getattr(obj, col, "") for col in headers]
+                writer.writerow([sanitize(v) for v in raw_vals])
 
         csv_content = output.getvalue()
         output.close()
